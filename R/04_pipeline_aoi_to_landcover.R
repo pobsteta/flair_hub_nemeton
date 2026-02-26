@@ -390,6 +390,8 @@ download_ortho_for_aoi <- function(aoi, output_dir, res_m = RES_IGN,
     message("\n=== Ortho RVB et IRC déjà téléchargées (cache) ===")
     rvb <- rast(rvb_path)
     irc <- rast(irc_path)
+    names(rvb)[1:min(3, nlyr(rvb))] <- c("Rouge", "Vert", "Bleu")[1:min(3, nlyr(rvb))]
+    names(irc)[1:min(3, nlyr(irc))] <- c("PIR", "Rouge", "Vert")[1:min(3, nlyr(irc))]
     message(sprintf("RVB: %s (%d x %d px)", rvb_path, ncol(rvb), nrow(rvb)))
     message(sprintf("IRC: %s (%d x %d px)", irc_path, ncol(irc), nrow(irc)))
     return(list(rvb = rvb, irc = irc,
