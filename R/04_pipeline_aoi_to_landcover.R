@@ -9,7 +9,7 @@
 # Workflow :
 #   1. Charger l'AOI depuis aoi.gpkg → reprojection Lambert-93
 #   2. Télécharger les ortho IGN RVB + IRC via WMS (tuiles si nécessaire)
-#   2b. Télécharger le MNT/MNS IGN via WCS (optionnel, config LC-B)
+#   2b. Télécharger le MNT/MNS IGN via WMS-R (optionnel, config LC-B)
 #   3. Combiner RVB + IRC en image 4 bandes RGBI
 #   4. Découper en patches de 512x512 à 0.2m
 #   5. Inférence du modèle FLAIR-HUB (Swin/ConvNeXTV2) via reticulate
@@ -36,11 +36,15 @@ library(curl)
 # ==============================================================================
 
 # --- IGN Géoplateforme ---
+# Toutes les données (ortho + élévation) sont accessibles via WMS-R.
+# La Géoplateforme n'offre pas de service WCS pour l'altimétrie.
 IGN_WMS_URL      <- "https://data.geopf.fr/wms-r"
-IGN_WCS_URL      <- "https://data.geopf.fr/wcs"
 IGN_LAYER_ORTHO  <- "ORTHOIMAGERY.ORTHOPHOTOS"
-IGN_COV_MNT      <- "ELEVATION.ELEVATIONGRIDCOVERAGE.HIGHRES"
-IGN_COV_MNS      <- "ELEVATION.ELEVATIONGRIDCOVERAGE.HIGHRES.MNS"
+IGN_LAYER_MNT    <- "ELEVATION.ELEVATIONGRIDCOVERAGE.HIGHRES"
+IGN_LAYER_MNS    <- "ELEVATION.ELEVATIONGRIDCOVERAGE.HIGHRES.MNS"
+# Alternatives LiDAR HD (couverture partielle mais plus précis) :
+# IGN_LAYER_MNT <- "IGNF_LIDAR-HD_MNT_ELEVATION.ELEVATIONGRIDCOVERAGE.LAMB93"
+# IGN_LAYER_MNS <- "IGNF_LIDAR-HD_MNS_ELEVATION.ELEVATIONGRIDCOVERAGE.LAMB93"
 
 # --- Millésime ortho ---
 # L'IRC-EXPRESS et l'ORTHO-EXPRESS sont millésimés : le suffixe année
@@ -57,9 +61,8 @@ RES_IGN <- 0.2   # BD ORTHO® IGN
 PATCH_SIZE <- 512  # Taille des patches (512x512 px à 0.2m)
 CONDA_ENV  <- "FLAIRHUB"
 
-# --- Limites WMS/WCS ---
+# --- Limites WMS ---
 WMS_MAX_PX <- 4096  # Taille max par requête WMS
-WCS_MAX_PX <- 2048  # Taille max par requête WCS
 
 # --- Classes CoSIA (palette officielle FLAIR-HUB) ---
 COSIA_LABELS_15 <- c(
@@ -246,8 +249,11 @@ build_layer_names <- function(millesime_irc, millesime_ortho = NULL) {
 #' @param layer Couche WMS
 #' @param res_m Résolution en mètres
 #' @param dest_file Fichier de sortie
+#' @param styles Style WMS ("" = défaut pour ortho, "normal" = valeurs brutes
+#'   pour couches d'élévation)
 #' @return SpatRaster ou NULL si échec
-download_wms_tile <- function(bbox, layer, res_m = RES_IGN, dest_file) {
+download_wms_tile <- function(bbox, layer, res_m = RES_IGN, dest_file,
+                               styles = "") {
   xmin <- bbox[1]; ymin <- bbox[2]; xmax <- bbox[3]; ymax <- bbox[4]
 
   width  <- round((xmax - xmin) / res_m)
@@ -263,7 +269,7 @@ download_wms_tile <- function(bbox, layer, res_m = RES_IGN, dest_file) {
     "&WIDTH=", width,
     "&HEIGHT=", height,
     "&FORMAT=image/geotiff",
-    "&STYLES="
+    "&STYLES=", styles
   )
 
   tryCatch({
@@ -291,16 +297,18 @@ download_wms_tile <- function(bbox, layer, res_m = RES_IGN, dest_file) {
   })
 }
 
-#' Télécharger une ortho IGN complète pour une emprise (avec tuilage automatique)
+#' Télécharger une couche WMS IGN complète pour une emprise (tuilage automatique)
 #'
 #' @param bbox c(xmin, ymin, xmax, ymax) en Lambert-93
-#' @param layer Couche WMS (RVB ou IRC)
+#' @param layer Couche WMS (ortho ou élévation)
 #' @param res_m Résolution en mètres
 #' @param output_dir Répertoire de sortie
 #' @param prefix Préfixe pour les fichiers
+#' @param styles Style WMS ("" pour ortho, "normal" pour élévation brute)
 #' @return SpatRaster mosaïqué
 download_ign_tiled <- function(bbox, layer, res_m = RES_IGN,
-                                output_dir, prefix = "ortho") {
+                                output_dir, prefix = "ortho",
+                                styles = "") {
   xmin <- bbox[1]; ymin <- bbox[2]; xmax <- bbox[3]; ymax <- bbox[4]
   tile_size_m <- WMS_MAX_PX * res_m
 
@@ -327,7 +335,8 @@ download_ign_tiled <- function(bbox, layer, res_m = RES_IGN,
       message(sprintf("  Tuile %d/%d [%.0f,%.0f - %.0f,%.0f]...",
                        idx, n_tiles, x0, y0, x1, y1))
 
-      r <- download_wms_tile(tile_bbox, layer, res_m, tile_file)
+      r <- download_wms_tile(tile_bbox, layer, res_m, tile_file,
+                              styles = styles)
       if (!is.null(r)) {
         tile_rasters[[idx]] <- r
       }
@@ -451,7 +460,7 @@ download_ortho_for_aoi <- function(aoi, output_dir, res_m = RES_IGN,
 }
 
 # ==============================================================================
-# 2b. Téléchargement du MNT/MNS IGN via WCS (RGE ALTI® 1m)
+# 2b. Téléchargement du MNT/MNS IGN via WMS-R (RGE ALTI® 1m)
 # ==============================================================================
 # FLAIR-HUB attend 2 bandes : DSM (MNS) + DTM (MNT) en Float32.
 #
@@ -459,7 +468,7 @@ download_ortho_for_aoi <- function(aoi, output_dir, res_m = RES_IGN,
 #   - DSM (MNS) = résolution native 0.2m (corrélation dense des photos aériennes)
 #   - DTM (MNT) = RGE ALTI natif à 1m, rééchantillonné à 0.2m
 #
-# Via la Géoplateforme IGN WCS :
+# Via la Géoplateforme IGN WMS-R (pas de service WCS disponible) :
 #   - MNT (DTM) : ELEVATION.ELEVATIONGRIDCOVERAGE.HIGHRES → RGE ALTI 1m
 #   - MNS (DSM) : ELEVATION.ELEVATIONGRIDCOVERAGE.HIGHRES.MNS → si disponible
 #     (couverture LiDAR HD en cours de déploiement, pas disponible partout)
@@ -467,115 +476,9 @@ download_ortho_for_aoi <- function(aoi, output_dir, res_m = RES_IGN,
 # Le CHM (Canopy Height Model) = DSM - DTM est utile pour distinguer
 # les classes arborées (feuillu, conifère) des classes basses (herbacé).
 
-#' Télécharger une couverture WCS IGN (MNT ou MNS)
-#'
-#' @param bbox Emprise c(xmin, ymin, xmax, ymax) en Lambert-93
-#' @param coverage_id Identifiant de la couverture WCS
-#' @param res_m Résolution en mètres (1 = RGE ALTI 1m)
-#' @param dest_file Fichier de destination
-#' @return SpatRaster ou NULL si échec
-download_wcs_coverage <- function(bbox, coverage_id, res_m = 1, dest_file) {
-  xmin <- bbox[1]; ymin <- bbox[2]; xmax <- bbox[3]; ymax <- bbox[4]
-
-  wcs_url <- paste0(
-    IGN_WCS_URL, "?",
-    "SERVICE=WCS&VERSION=2.0.1&REQUEST=GetCoverage",
-    "&CoverageId=", coverage_id,
-    "&SUBSET=x(", xmin, ",", xmax, ")",
-    "&SUBSET=y(", ymin, ",", ymax, ")",
-    "&SUBSETTINGCRS=http://www.opengis.net/def/crs/EPSG/0/2154",
-    "&OUTPUTCRS=http://www.opengis.net/def/crs/EPSG/0/2154",
-    "&FORMAT=image/tiff"
-  )
-
-  tryCatch({
-    tmp_file <- tempfile(fileext = ".tif")
-    curl_download(url = wcs_url, destfile = tmp_file, quiet = TRUE)
-
-    # Vérifier que c'est bien un GeoTIFF (pas une erreur XML)
-    fsize <- file.info(tmp_file)$size
-    if (fsize < 1000) {
-      raw <- readLines(tmp_file, n = 5, warn = FALSE)
-      if (any(grepl("Exception|Error|xml", raw, ignore.case = TRUE))) {
-        warning("Erreur WCS pour ", coverage_id, " : ", paste(raw, collapse = " "))
-        unlink(tmp_file)
-        return(NULL)
-      }
-    }
-
-    r <- rast(tmp_file)
-    writeRaster(r, dest_file, overwrite = TRUE)
-    r <- rast(dest_file)
-    unlink(tmp_file)
-
-    return(r)
-  }, error = function(e) {
-    unlink(tmp_file)
-    warning("Échec WCS (", coverage_id, "): ", e$message)
-    return(NULL)
-  })
-}
-
-#' Télécharger une élévation IGN complète pour une emprise (avec tuilage WCS)
-#'
-#' @param bbox Emprise c(xmin, ymin, xmax, ymax)
-#' @param coverage_id Couverture WCS
-#' @param res_m Résolution (1m par défaut)
-#' @param output_dir Répertoire de sortie
-#' @param prefix Préfixe des fichiers
-#' @return SpatRaster
-download_elevation_tiled <- function(bbox, coverage_id, res_m = 1,
-                                      output_dir, prefix = "elev") {
-  xmin <- bbox[1]; ymin <- bbox[2]; xmax <- bbox[3]; ymax <- bbox[4]
-  tile_size_m <- WCS_MAX_PX * res_m
-
-  x_starts <- seq(xmin, xmax, by = tile_size_m)
-  y_starts <- seq(ymin, ymax, by = tile_size_m)
-  n_tiles <- length(x_starts) * length(y_starts)
-  message(sprintf("Téléchargement %s (%s): %d tuile(s) WCS à %dm...",
-                   prefix, coverage_id, n_tiles, res_m))
-
-  tile_rasters <- list()
-  idx <- 1
-
-  for (x0 in x_starts) {
-    for (y0 in y_starts) {
-      x1 <- min(x0 + tile_size_m, xmax)
-      y1 <- min(y0 + tile_size_m, ymax)
-
-      if ((x1 - x0) < res_m * 2 || (y1 - y0) < res_m * 2) next
-
-      tile_bbox <- c(x0, y0, x1, y1)
-      tile_file <- file.path(output_dir,
-                              sprintf("%s_tile_%03d.tif", prefix, idx))
-
-      message(sprintf("  Tuile %d/%d...", idx, n_tiles))
-      r <- download_wcs_coverage(tile_bbox, coverage_id, res_m, tile_file)
-      if (!is.null(r)) {
-        tile_rasters[[idx]] <- r
-      }
-      idx <- idx + 1
-    }
-  }
-
-  if (length(tile_rasters) == 0) {
-    warning("Aucune tuile WCS téléchargée pour ", coverage_id)
-    return(NULL)
-  }
-
-  if (length(tile_rasters) == 1) {
-    mosaic <- tile_rasters[[1]]
-  } else {
-    message("Mosaïquage de ", length(tile_rasters), " tuiles ", prefix, "...")
-    mosaic <- do.call(merge, tile_rasters)
-  }
-
-  return(mosaic)
-}
-
 #' Télécharger le DEM (DSM + DTM) pour une AOI
 #'
-#' Télécharge le MNS (DSM) et le MNT (DTM) depuis le WCS IGN (RGE ALTI 1m)
+#' Télécharge le MNS (DSM) et le MNT (DTM) depuis le WMS-R IGN (RGE ALTI 1m)
 #' et les combine en un SpatRaster 2 bandes comme attendu par FLAIR-HUB.
 #'
 #' Gestion du cache : si dem_dsm_dtm.tif existe déjà, il est réutilisé.
@@ -600,13 +503,19 @@ download_dem_for_aoi <- function(aoi, output_dir, res_m = 1, rgbi = NULL) {
   }
 
   bbox <- as.numeric(st_bbox(st_union(aoi)))
-  message(sprintf("\n=== Téléchargement MNT/MNS IGN (RGE ALTI %dm) ===", res_m))
+  message(sprintf("\n=== Téléchargement MNT/MNS IGN (RGE ALTI %dm via WMS-R) ===",
+                   res_m))
 
   # MNT (DTM - terrain nu) — disponible partout en France (RGE ALTI)
   message("\n--- MNT (DTM, terrain nu, RGE ALTI) ---")
-  dtm <- download_elevation_tiled(
-    bbox, coverage_id = IGN_COV_MNT, res_m = res_m,
-    output_dir = output_dir, prefix = "mnt"
+  dtm <- tryCatch(
+    download_ign_tiled(bbox, layer = IGN_LAYER_MNT, res_m = res_m,
+                        output_dir = output_dir, prefix = "mnt",
+                        styles = "normal"),
+    error = function(e) {
+      message("  MNT non téléchargé: ", e$message)
+      NULL
+    }
   )
 
   # MNS (DSM - surface avec bâtiments/végétation)
@@ -615,10 +524,9 @@ download_dem_for_aoi <- function(aoi, output_dir, res_m = 1, rgbi = NULL) {
   message("\n--- MNS (DSM, surface, LiDAR HD) ---")
   message("  Note : le MNS n'est pas disponible partout (LiDAR HD en cours)")
   dsm <- tryCatch(
-    download_elevation_tiled(
-      bbox, coverage_id = IGN_COV_MNS, res_m = res_m,
-      output_dir = output_dir, prefix = "mns"
-    ),
+    download_ign_tiled(bbox, layer = IGN_LAYER_MNS, res_m = res_m,
+                        output_dir = output_dir, prefix = "mns",
+                        styles = "normal"),
     error = function(e) {
       message("  MNS non disponible pour cette zone: ", e$message)
       NULL
@@ -909,7 +817,7 @@ run_inference <- function(rgbi, model_path) {
     result <- predictions[[1]]
   } else {
     message("Mosaïquage des prédictions...")
-    result <- do.call(merge, predictions)
+    result <- do.call(merge, unname(predictions))
   }
 
   names(result) <- "landcover"
