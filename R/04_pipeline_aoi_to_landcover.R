@@ -208,13 +208,33 @@ test_wms_layer <- function(bbox, layer) {
 
 #' Construire les noms de couches WMS pour un millésime donné
 #'
+#' Quand un millésime est spécifié, les deux couches (RVB et IRC) sont
+#' millésimées pour garantir la cohérence temporelle de l'étude :
+#'   - RVB : ORTHO-EXPRESS.{année} (au lieu de la mosaïque nationale)
+#'   - IRC : IRC-EXPRESS.{année}
+#'
+#' Quand millesime = NULL (auto), la RVB utilise la mosaïque nationale
+#' (dernier millésime disponible) et l'IRC le millésime détecté.
+#'
 #' @param millesime Année (entier)
+#' @param force_millesime_rvb Si TRUE, utilise ORTHO-EXPRESS.{année} pour
+#'   le RVB aussi. Si FALSE, utilise la mosaïque nationale pour le RVB.
 #' @return Liste nommée avec les couches ortho et irc
-build_layer_names <- function(millesime) {
-  list(
-    ortho = IGN_LAYER_ORTHO,
-    irc   = paste0("ORTHOIMAGERY.ORTHOPHOTOS.IRC-EXPRESS.", millesime)
-  )
+build_layer_names <- function(millesime, force_millesime_rvb = TRUE) {
+  irc_layer <- paste0("ORTHOIMAGERY.ORTHOPHOTOS.IRC-EXPRESS.", millesime)
+
+  if (force_millesime_rvb) {
+    ortho_layer <- paste0("ORTHOIMAGERY.ORTHOPHOTOS.ORTHO-EXPRESS.", millesime)
+    message(sprintf("  Couches millésimées %d:", millesime))
+    message(sprintf("    RVB: %s", ortho_layer))
+    message(sprintf("    IRC: %s", irc_layer))
+  } else {
+    ortho_layer <- IGN_LAYER_ORTHO
+    message(sprintf("  RVB: %s (mosaïque nationale)", ortho_layer))
+    message(sprintf("  IRC: %s", irc_layer))
+  }
+
+  list(ortho = ortho_layer, irc = irc_layer)
 }
 
 #' Télécharger une tuile WMS IGN
@@ -331,11 +351,16 @@ download_ign_tiled <- function(bbox, layer, res_m = RES_IGN,
 #' Gestion du cache : si ortho_rvb.tif et ortho_irc.tif existent déjà,
 #' ils sont réutilisés sans re-téléchargement.
 #'
+#' Gestion du millésime :
+#'   - NULL (par défaut) : mosaïques nationales (dernier millésime, toute la France)
+#'   - Entier (ex: 2024) : couches ORTHO-EXPRESS + IRC-EXPRESS du millésime donné
+#'     (RVB et IRC sont cohérents temporellement, mais couverture partielle)
+#'
 #' @param aoi sf object (AOI en Lambert-93)
 #' @param output_dir Répertoire de sortie
 #' @param res_m Résolution en mètres
-#' @param millesime Millésime IRC (NULL = auto, entier = année forcée)
-#' @return Liste avec rvb, irc (SpatRaster), millesime (entier)
+#' @param millesime Millésime (NULL = mosaïque nationale, entier = année forcée)
+#' @return Liste avec rvb, irc (SpatRaster), millesime (entier ou NULL)
 download_ortho_for_aoi <- function(aoi, output_dir, res_m = RES_IGN,
                                     millesime = NULL) {
   dir_create(output_dir)
@@ -351,7 +376,8 @@ download_ortho_for_aoi <- function(aoi, output_dir, res_m = RES_IGN,
     message(sprintf("RVB: %s (%d x %d px)", rvb_path, ncol(rvb), nrow(rvb)))
     message(sprintf("IRC: %s (%d x %d px)", irc_path, ncol(irc), nrow(irc)))
     return(list(rvb = rvb, irc = irc,
-                rvb_path = rvb_path, irc_path = irc_path))
+                rvb_path = rvb_path, irc_path = irc_path,
+                millesime = millesime))
   }
 
   bbox <- as.numeric(st_bbox(st_union(aoi)))
@@ -362,17 +388,26 @@ download_ortho_for_aoi <- function(aoi, output_dir, res_m = RES_IGN,
                    bbox[3] - bbox[1], bbox[4] - bbox[2],
                    (bbox[3] - bbox[1]) * (bbox[4] - bbox[2]) / 10000))
 
-  # Résoudre le millésime IRC (détection auto si NULL)
-  millesime <- resolve_millesime(millesime, bbox)
-  layers <- build_layer_names(millesime)
+  # Résoudre les couches en fonction du millésime
+  if (!is.null(millesime)) {
+    # Millésime forcé : ORTHO-EXPRESS + IRC-EXPRESS du même millésime
+    millesime <- as.integer(millesime)
+    millesime <- resolve_millesime(millesime, bbox)
+    layers <- build_layer_names(millesime, force_millesime_rvb = TRUE)
+  } else {
+    # Auto : mosaïques nationales (dernier dispo, couverture France entière)
+    millesime_irc <- resolve_millesime(NULL, bbox)
+    layers <- build_layer_names(millesime_irc, force_millesime_rvb = FALSE)
+    millesime <- millesime_irc
+  }
 
-  # RVB (mosaïque nationale, toujours le dernier millésime disponible)
+  # RVB
   message("\n--- Ortho RVB ---")
   rvb <- download_ign_tiled(bbox, layer = layers$ortho, res_m = res_m,
                              output_dir = output_dir, prefix = "rvb")
   names(rvb)[1:min(3, nlyr(rvb))] <- c("Rouge", "Vert", "Bleu")[1:min(3, nlyr(rvb))]
 
-  # IRC (millésimé)
+  # IRC
   message(sprintf("\n--- Ortho IRC (millésime %d) ---", millesime))
   irc <- download_ign_tiled(bbox, layer = layers$irc, res_m = res_m,
                              output_dir = output_dir, prefix = "irc")
@@ -1081,9 +1116,9 @@ if (sys.nframe() == 0) {
     message('  result <- pipeline_aoi_to_landcover("data/aoi.gpkg",')
     message('    use_dem = TRUE, dem_res_m = 1)')
     message("")
-    message('  # Avec un millésime IRC spécifique :')
+    message('  # Étude sur un millésime spécifique (RVB + IRC cohérents) :')
     message('  result <- pipeline_aoi_to_landcover("data/aoi.gpkg",')
-    message('    millesime = 2024)')
+    message('    millesime = 2024)  # ORTHO-EXPRESS.2024 + IRC-EXPRESS.2024')
     message("")
     message('  # Avec un modèle local :')
     message('  result <- pipeline_aoi_to_landcover("data/aoi.gpkg",')
