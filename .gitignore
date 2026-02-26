@@ -1,0 +1,33 @@
+# R package build artifacts
+*.Rcheck/
+*.tar.gz
+*.Rproj.user
+.Rproj.user/
+.Rhistory
+.RData
+.Ruserdata
+src/*.o
+src/*.so
+src/*.dll
+
+# Data files (too large for git)
+data/
+data-raw/*.tif
+data-raw/*.jp2
+data-raw/*.nc
+outputs/
+
+# IDE
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Python
+__pycache__/
+*.pyc
+.conda/

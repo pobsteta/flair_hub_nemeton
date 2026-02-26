@@ -1,0 +1,33 @@
+Package: flairhub
+Title: FLAIR-HUB - Large-Scale Multimodal Dataset for Land Cover and Crop Mapping
+Version: 0.1.0
+Authors@R:
+    person("Pascal", "Obstetar", , "pascal.obstetar@gmail.com", role = c("aut", "cre"))
+Description: Interface R pour le dataset FLAIR-HUB de l'IGN (Institut national
+    de l'information géographique et forestière). FLAIR-HUB est le plus grand
+    dataset multi-capteurs d'occupation du sol avec des annotations très haute
+    résolution (20 cm), couvrant 2 528 km² de France. Ce package permet de
+    télécharger les données depuis Hugging Face (IGNF/FLAIR-HUB), de charger
+    et analyser les 6 modalités alignées (aérien RGBI, Sentinel-1/2, SPOT,
+    MNT, photos historiques), de visualiser les 19 classes d'occupation du sol
+    et 23 classes de cultures, et d'exécuter les modèles pré-entraînés
+    (ConvNeXTV2, Swin, UNet, UPerNet) pour la segmentation sémantique.
+License: file LICENSE
+Encoding: UTF-8
+Roxygen: list(markdown = TRUE)
+RoxygenNote: 7.3.2
+Imports:
+    terra,
+    sf,
+    httr2,
+    jsonlite,
+    curl,
+    fs,
+    reticulate
+Suggests:
+    testthat (>= 3.0.0),
+    knitr,
+    rmarkdown
+VignetteBuilder: knitr
+URL: https://github.com/pobsteta/flair_hub_nemeton
+BugReports: https://github.com/pobsteta/flair_hub_nemeton/issues
