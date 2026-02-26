@@ -494,9 +494,11 @@ hf_git_clone <- function(dest_dir = file.path(DATA_DIR_HF, "FLAIR-HUB"),
 #' @param overwrite Écraser si déjà présent
 #' @return Chemin du répertoire décompressé
 download_toy_dataset <- function(dest_dir = DATA_DIR_HF, overwrite = FALSE) {
+  # URL officielle du toy dataset (hébergé sur OVH par l'IGN)
   toy_url <- paste0(
-    "https://huggingface.co/datasets/IGNF/FLAIR-HUB/resolve/main/",
-    "FLAIR-HUB_TOY_DATASET.zip"
+    "https://storage.gra.cloud.ovh.net/v1/",
+    "AUTH_366279ce616242ebb14161b7991a8461/",
+    "defi-ia/flair_hub/FLAIR-HUB_TOY_DATASET.zip"
   )
   zip_path <- file.path(dest_dir, "FLAIR-HUB_TOY_DATASET.zip")
   toy_dir <- file.path(dest_dir, "FLAIR-HUB_TOY_DATASET")
@@ -726,6 +728,148 @@ scan_flair_files <- function(dir_path = DATA_DIR_HF, recursive = TRUE) {
   }
 
   return(df)
+}
+
+# ==============================================================================
+# C. Configurations multimodales (LC-A à LC-L)
+# ==============================================================================
+
+# Performances de référence (benchmark FLAIR-HUB, arXiv:2506.07080)
+#
+# | Config | Modalités                              | mIoU   | OA     |
+# |--------|----------------------------------------|--------|--------|
+# | LC-A   | Aérien RGBI seul                       | 64.1%  | 77.5%  |
+# | LC-B   | Aérien + MNT                           | 65.1%  | —      |
+# | LC-C   | Aérien + MNT + SPOT                    | ~65%   | —      |
+# | LC-D   | Aérien + MNT + Sentinel-2              | ~65%   | —      |
+# | LC-E   | Aérien + MNT + Sentinel-1              | ~65%   | —      |
+# | LC-F   | Aérien + Sentinel-1/2                  | ~65%   | —      |
+# | LC-G   | Sentinel-2 seul                        | 34.2%  | 57.8%  |
+# | LC-H   | Sentinel-1 seul                        | 28.2%  | —      |
+# | LC-I   | SPOT seul                              | 43.5%  | —      |
+# | LC-L   | Toutes modalités                       | 65.8%  | 78.2%  |
+#
+# Conclusion : l'aérien RGBI seul (LC-A) donne 97% de la performance max.
+# Ajouter d'autres modalités apporte un gain marginal (+1.7 pts mIoU).
+
+FLAIR_CONFIGS <- data.frame(
+  config = c("LC-A", "LC-B", "LC-C", "LC-D", "LC-E", "LC-F",
+             "LC-G", "LC-H", "LC-I", "LC-L"),
+  modalities = c(
+    "AERIAL_RGBI",
+    "AERIAL_RGBI + DEM_ELEV",
+    "AERIAL_RGBI + DEM_ELEV + SPOT_RGBI",
+    "AERIAL_RGBI + DEM_ELEV + SENTINEL2_TS",
+    "AERIAL_RGBI + DEM_ELEV + SENTINEL1_TS",
+    "AERIAL_RGBI + SENTINEL2_TS + SENTINEL1_TS",
+    "SENTINEL2_TS",
+    "SENTINEL1_TS",
+    "SPOT_RGBI",
+    "Toutes modalités"
+  ),
+  miou = c(64.1, 65.1, NA, NA, NA, NA, 34.2, 28.2, 43.5, 65.8),
+  oa = c(77.5, NA, NA, NA, NA, NA, 57.8, NA, NA, 78.2),
+  description = c(
+    "Recommandé : meilleur rapport performance/simplicité",
+    "Ajoute la hauteur (DSM-DTM), gain +1pt mIoU",
+    "SPOT apporte peu de gain supplémentaire",
+    "Sentinel-2 aide pour cultures (labouré, etc.)",
+    "Sentinel-1 SAR apporte peu seul",
+    "Sans MNT, avec séries temporelles",
+    "Sentinel-2 seul : faible résolution = performance limitée",
+    "Sentinel-1 seul : le moins performant",
+    "SPOT seul : résolution intermédiaire",
+    "Toutes modalités : gain marginal vs LC-A"
+  ),
+  stringsAsFactors = FALSE
+)
+
+#' Télécharger les données nécessaires pour une configuration donnée
+#'
+#' Télécharge depuis Hugging Face les modalités requises par la configuration
+#' choisie (LC-A à LC-L).
+#'
+#' @param config Configuration ("LC-A", "LC-B", ..., "LC-L")
+#' @param domain Code du domaine (ex: "D001_2020")
+#' @param n_patches Nombre de patches à télécharger
+#' @param dest_dir Répertoire de destination
+#' @param token Token Hugging Face
+#' @return Liste des chemins téléchargés par modalité
+download_config <- function(config = "LC-A", domain = NULL, n_patches = 10,
+                             dest_dir = DATA_DIR_HF, token = HF_TOKEN) {
+  config <- toupper(config)
+  idx <- match(config, FLAIR_CONFIGS$config)
+  if (is.na(idx)) {
+    stop("Configuration inconnue: ", config,
+         "\nConfigurations valides: ", paste(FLAIR_CONFIGS$config, collapse = ", "))
+  }
+
+  message("=== Configuration ", config, " ===")
+  message("Modalités: ", FLAIR_CONFIGS$modalities[idx])
+  message("Description: ", FLAIR_CONFIGS$description[idx])
+  if (!is.na(FLAIR_CONFIGS$miou[idx])) {
+    message(sprintf("Benchmark: mIoU=%.1f%%", FLAIR_CONFIGS$miou[idx]))
+  }
+
+  # Déterminer les modalités à télécharger
+  modalities_needed <- switch(config,
+    "LC-A" = c("AERIAL_RGBI"),
+    "LC-B" = c("AERIAL_RGBI", "DEM_ELEV"),
+    "LC-C" = c("AERIAL_RGBI", "DEM_ELEV", "SPOT_RGBI"),
+    "LC-D" = c("AERIAL_RGBI", "DEM_ELEV", "SENTINEL2_TS"),
+    "LC-E" = c("AERIAL_RGBI", "DEM_ELEV", "SENTINEL1-ASC_TS"),
+    "LC-F" = c("AERIAL_RGBI", "SENTINEL2_TS", "SENTINEL1-ASC_TS"),
+    "LC-G" = c("SENTINEL2_TS"),
+    "LC-H" = c("SENTINEL1-ASC_TS"),
+    "LC-I" = c("SPOT_RGBI"),
+    "LC-L" = c("AERIAL_RGBI", "DEM_ELEV", "SPOT_RGBI",
+               "SENTINEL2_TS", "SENTINEL1-ASC_TS", "SENTINEL1-DESC_TS",
+               "AERIAL-RLT_PAN")
+  )
+
+  # Toujours télécharger les labels CoSIA
+  modalities_needed <- c(modalities_needed, "AERIAL_LABEL-COSIA")
+
+  message(sprintf("\nTéléchargement de %d modalité(s):", length(modalities_needed)))
+  for (m in modalities_needed) message("  - ", m)
+
+  results <- list()
+  for (mod in modalities_needed) {
+    message(sprintf("\n--- Modalité: %s ---", mod))
+    paths <- download_flair_hub_subset(
+      domain = domain,
+      modality = mod,
+      n_patches = n_patches,
+      dest_dir = dest_dir,
+      token = token
+    )
+    results[[mod]] <- paths
+  }
+
+  message("\n=== Téléchargement terminé pour config ", config, " ===")
+  return(results)
+}
+
+#' Afficher les configurations disponibles et leurs performances
+#'
+#' @return Invisible data.frame des configurations
+show_configs <- function() {
+  message("=== Configurations FLAIR-HUB ===")
+  message("(benchmark : arXiv:2506.07080)\n")
+
+  for (i in seq_len(nrow(FLAIR_CONFIGS))) {
+    cfg <- FLAIR_CONFIGS[i, ]
+    perf <- if (!is.na(cfg$miou)) sprintf(" [mIoU=%.1f%%]", cfg$miou) else ""
+    message(sprintf("  %s : %s%s", cfg$config, cfg$modalities, perf))
+    message(sprintf("         %s", cfg$description))
+  }
+
+  message("\nRecommandation :")
+  message("  - Premier test : LC-A (aérien seul, 64.1% mIoU)")
+  message("  - Meilleur rapport perf/complexité : LC-B (aérien + MNT)")
+  message("  - Performance maximale : LC-L (toutes modalités, +1.7pt)")
+
+  return(invisible(FLAIR_CONFIGS))
 }
 
 # ==============================================================================

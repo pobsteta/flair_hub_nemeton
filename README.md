@@ -83,6 +83,17 @@ library(reticulate)
 use_condaenv("FLAIRHUB", required = TRUE)
 ```
 
+## Quelles données télécharger ?
+
+L'aérien RGBI seul donne déjà **97% de la performance maximale** (64.1% vs 65.8% mIoU). Ajouter Sentinel, SPOT, etc. apporte un gain marginal.
+
+| Config | Données nécessaires | mIoU | Recommandation |
+|---|---|---|---|
+| **LC-A** | Aérien RGBI seul | 64.1% | **Premier test** |
+| **LC-B** | Aérien + MNT (DSM/DTM) | 65.1% | Meilleur rapport perf/complexité |
+| **LC-D** | Aérien + MNT + Sentinel-2 | ~65% | Si cultures (labouré, etc.) |
+| **LC-L** | Toutes modalités | 65.8% | Performance maximale |
+
 ## Utilisation
 
 ### 0. Tester rapidement avec le TOY DATASET
@@ -90,11 +101,14 @@ use_condaenv("FLAIRHUB", required = TRUE)
 ```r
 source("R/01_download_flair_hub.R")
 
-# Télécharger le petit jeu de données de test (quelques Mo)
+# Télécharger le petit jeu de données de test
 toy_dir <- download_toy_dataset()
 
-# Lister les fichiers disponibles
+# Lister les fichiers disponibles par modalité
 scan_flair_files(toy_dir)
+
+# Voir toutes les configurations et leurs performances
+show_configs()
 ```
 
 ### 1. Télécharger les données FLAIR-HUB
@@ -102,16 +116,29 @@ scan_flair_files(toy_dir)
 ```r
 source("R/01_download_flair_hub.R")
 
-# Télécharger un sous-ensemble (10 patches aérien RGBI)
-download_flair_hub_subset(modality = "AERIAL_RGBI", n_patches = 10)
+# --- Méthode rapide : télécharger par configuration ---
+# Config LC-A (aérien seul, recommandé pour commencer)
+download_config("LC-A", n_patches = 10)
 
-# Télécharger une modalité complète pour un domaine
-download_flair_hub_modality("D001_2020", modality = "AERIAL_RGBI")
+# Config LC-B (aérien + MNT, meilleur rapport perf/complexité)
+download_config("LC-B", n_patches = 10)
+
+# Config LC-D (aérien + MNT + Sentinel-2, pour les cultures)
+download_config("LC-D", n_patches = 10)
+
+# Config LC-L (toutes modalités, performance max)
+download_config("LC-L", n_patches = 5)
+
+# --- Méthode manuelle : télécharger par modalité ---
+download_flair_hub_subset(modality = "AERIAL_RGBI", n_patches = 10)
+download_flair_hub_subset(modality = "DEM_ELEV", n_patches = 10)
+download_flair_hub_subset(modality = "SENTINEL2_TS", n_patches = 10)
 
 # Charger les différentes modalités
 aerial <- load_aerial_rgbi("data/flair_hub/patch_aerial.tif")
 spot   <- load_spot_rgbi("data/flair_hub/patch_spot.tif")
 dem    <- load_dem_elev("data/flair_hub/patch_dem.tif")
+s2     <- load_sentinel2_sits("data/flair_hub/patch_s2.tif")
 labels <- load_label_cosia("data/flair_hub/patch_label.tif")
 ```
 
