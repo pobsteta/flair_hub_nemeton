@@ -297,8 +297,14 @@ setup_python <- function() {
   }
 }
 
-#' Télécharger un modèle FLAIR-HUB depuis Hugging Face
-download_model <- function(model_name = "FLAIR-HUB_LC-A_swin-tiny-unet") {
+#' Télécharger un modèle FLAIR depuis Hugging Face
+#'
+#' Par défaut, utilise FLAIR-INC_rgbi_15cl_resnet34-unet (le plus simple).
+#' Pour le modèle FLAIR-HUB multimodal, utiliser "FLAIR-HUB_LC-G_utae".
+#'
+#' @param model_name Nom du modèle
+#' @return Chemin local du modèle
+download_model <- function(model_name = "FLAIR-INC_rgbi_15cl_resnet34-unet") {
   library(reticulate)
   hf_hub <- import("huggingface_hub")
 
@@ -470,7 +476,7 @@ run_inference <- function(rgbi, model_path) {
 #' @return Liste avec tous les résultats
 pipeline_aoi_to_landcover <- function(aoi_path,
                                         output_dir = file.path(getwd(), "outputs"),
-                                        model_name = "FLAIR-HUB_LC-A_swin-tiny-unet",
+                                        model_name = "FLAIR-INC_rgbi_15cl_resnet34-unet",
                                         model_path = NULL,
                                         res_m = RES_IGN) {
   dir_create(output_dir)

@@ -52,31 +52,47 @@ PATCH_SIZE <- 512  # 512x512 pixels à 0.2m = 102.4m x 102.4m
 CONDA_ENV <- "FLAIRHUB"
 
 # --- Modèles pré-entraînés disponibles sur Hugging Face ---
-# Occupation du sol (Land Cover) : encodeur-décodeur
+# Collection : https://huggingface.co/collections/IGNF/flair-models-684035e78bd5bff99199ff87
+#
+# FLAIR-HUB (multimodal, FLAIR-HUB dataset) :
 FLAIR_HUB_MODELS_LC <- data.frame(
   name = c(
     "FLAIR-HUB_LC-G_utae",
-    "FLAIR-HUB_LC-A_swin-tiny-unet",
-    "FLAIR-HUB_LC-A_swin-small-unet",
-    "FLAIR-HUB_LC-A_swin-base-unet",
-    "FLAIR-HUB_LC-A_swin-large-unet",
-    "FLAIR-HUB_LC-A_convnextv2-tiny-unet",
-    "FLAIR-HUB_LC-A_convnextv2-base-unet"
+    "FLAIR-HUB_LC-A_IR_convnextv2tiny-upernet"
   ),
   hf_repo = c(
     "IGNF/FLAIR-HUB_LC-G_utae",
-    "IGNF/FLAIR-HUB_LC-A_swin-tiny-unet",
-    "IGNF/FLAIR-HUB_LC-A_swin-small-unet",
-    "IGNF/FLAIR-HUB_LC-A_swin-base-unet",
-    "IGNF/FLAIR-HUB_LC-A_swin-large-unet",
-    "IGNF/FLAIR-HUB_LC-A_convnextv2-tiny-unet",
-    "IGNF/FLAIR-HUB_LC-A_convnextv2-base-unet"
+    "IGNF/FLAIR-HUB_LC-A_IR_convnextv2tiny-upernet"
   ),
-  task = rep("landcover", 7),
-  n_classes = rep(15, 7),
-  encoder = c("U-TAE", "Swin-T", "Swin-S", "Swin-B", "Swin-L",
-              "ConvNeXTV2-T", "ConvNeXTV2-B"),
-  decoder = c("UperFuse", rep("UNet", 6)),
+  task = rep("landcover", 2),
+  n_classes = rep(15, 2),
+  encoder = c("U-TAE", "ConvNeXTV2-Tiny"),
+  decoder = c("UperFuse", "UPerNet"),
+  input_modality = c("multimodal (Sentinel-2 SITS)", "aérien RGBI"),
+  stringsAsFactors = FALSE
+)
+
+# FLAIR-INC (plus simples, aérien seul, FLAIR#1 dataset) :
+# Recommandés pour un premier test
+FLAIR_INC_MODELS <- data.frame(
+  name = c(
+    "FLAIR-INC_rgbi_15cl_resnet34-unet",
+    "FLAIR-INC_rgbie_15cl_resnet34-unet",
+    "FLAIR-INC_rgb_15cl_resnet34-unet",
+    "FLAIR-INC_rgb_12cl_resnet34-unet"
+  ),
+  hf_repo = c(
+    "IGNF/FLAIR-INC_rgbi_15cl_resnet34-unet",
+    "IGNF/FLAIR-INC_rgbie_15cl_resnet34-unet",
+    "IGNF/FLAIR-INC_rgb_15cl_resnet34-unet",
+    "IGNF/FLAIR-INC_rgb_12cl_resnet34-unet"
+  ),
+  task = rep("landcover", 4),
+  n_classes = c(15, 15, 15, 12),
+  encoder = rep("ResNet34", 4),
+  decoder = rep("UNet", 4),
+  input_modality = c("RGBI (4 bandes)", "RGBI+E (5 bandes)",
+                     "RGB (3 bandes)", "RGB (3 bandes)"),
   stringsAsFactors = FALSE
 )
 
@@ -105,24 +121,34 @@ setup_conda_env <- function(envname = CONDA_ENV) {
   }
 }
 
-#' Télécharger un modèle pré-entraîné FLAIR-HUB depuis Hugging Face
+#' Télécharger un modèle pré-entraîné depuis Hugging Face
 #'
-#' @param model_name Nom du modèle (ex: "FLAIR-HUB_LC-A_swin-tiny-unet")
-#' @param hf_repo Identifiant du dépôt HF (ex: "IGNF/FLAIR-HUB_LC-A_swin-tiny-unet")
+#' Supporte les modèles FLAIR-HUB et FLAIR-INC.
+#' Pour un premier test, utiliser un modèle FLAIR-INC (plus simple) :
+#'   download_pretrained_model("FLAIR-INC_rgbi_15cl_resnet34-unet")
+#'
+#' @param model_name Nom du modèle (ex: "FLAIR-INC_rgbi_15cl_resnet34-unet")
+#' @param hf_repo Identifiant du dépôt HF (optionnel, déduit du nom)
 #' @return Chemin local du modèle
-download_pretrained_model <- function(model_name = "FLAIR-HUB_LC-A_swin-tiny-unet",
+download_pretrained_model <- function(model_name = "FLAIR-INC_rgbi_15cl_resnet34-unet",
                                        hf_repo = NULL) {
   library(reticulate)
   hf_hub <- import("huggingface_hub")
 
-  # Trouver le dépôt HF si non spécifié
-
+  # Trouver le dépôt HF : chercher dans les deux tables de modèles
   if (is.null(hf_repo)) {
+    # Chercher d'abord dans FLAIR-HUB
     idx <- match(model_name, FLAIR_HUB_MODELS_LC$name)
     if (!is.na(idx)) {
       hf_repo <- FLAIR_HUB_MODELS_LC$hf_repo[idx]
     } else {
-      hf_repo <- paste0("IGNF/", model_name)
+      # Chercher dans FLAIR-INC
+      idx2 <- match(model_name, FLAIR_INC_MODELS$name)
+      if (!is.na(idx2)) {
+        hf_repo <- FLAIR_INC_MODELS$hf_repo[idx2]
+      } else {
+        hf_repo <- paste0("IGNF/", model_name)
+      }
     }
   }
 
@@ -556,8 +582,10 @@ evaluate_predictions <- function(prediction, reference) {
 
 if (sys.nframe() == 0) {
   message("=== FLAIR-HUB : Prédiction par segmentation sémantique ===\n")
-  message("Modèles disponibles (occupation du sol):")
-  print(FLAIR_HUB_MODELS_LC[, c("name", "encoder", "decoder")])
+  message("Modèles FLAIR-HUB (multimodal):")
+  print(FLAIR_HUB_MODELS_LC[, c("name", "encoder", "decoder", "input_modality")])
+  message("\nModèles FLAIR-INC (plus simples, recommandés pour tester):")
+  print(FLAIR_INC_MODELS[, c("name", "encoder", "n_classes", "input_modality")])
 
   message("\nWorkflow :")
   message("  1. Charger les images (aérien RGBI, SPOT, Sentinel, MNT)")

@@ -85,6 +85,18 @@ use_condaenv("FLAIRHUB", required = TRUE)
 
 ## Utilisation
 
+### 0. Tester rapidement avec le TOY DATASET
+
+```r
+source("R/01_download_flair_hub.R")
+
+# Télécharger le petit jeu de données de test (quelques Mo)
+toy_dir <- download_toy_dataset()
+
+# Lister les fichiers disponibles
+scan_flair_files(toy_dir)
+```
+
 ### 1. Télécharger les données FLAIR-HUB
 
 ```r
@@ -135,7 +147,11 @@ source("R/03_prediction_flair_hub.R")
 setup_conda_env("FLAIRHUB")
 
 # Télécharger un modèle pré-entraîné
-model_path <- download_pretrained_model("FLAIR-HUB_LC-A_swin-tiny-unet")
+# Option 1 : FLAIR-INC (simple, ResNet34-UNet, recommandé pour commencer)
+model_path <- download_pretrained_model("FLAIR-INC_rgbi_15cl_resnet34-unet")
+
+# Option 2 : FLAIR-HUB (multimodal, ConvNeXTV2-UPerNet)
+# model_path <- download_pretrained_model("FLAIR-HUB_LC-A_IR_convnextv2tiny-upernet")
 
 # Prédire depuis une image aérienne RGBI
 landcover <- predict_landcover_from_aerial("data/ign/ortho_rgbi.tif", model_path)
@@ -153,7 +169,7 @@ result <- pipeline_aoi_to_landcover("data/aoi.gpkg")
 result <- pipeline_aoi_to_landcover(
   aoi_path    = "chemin/vers/ma_zone.gpkg",
   output_dir  = "outputs",
-  model_name  = "FLAIR-HUB_LC-A_swin-tiny-unet"
+  model_name  = "FLAIR-INC_rgbi_15cl_resnet34-unet"
 )
 
 # Le résultat contient :
@@ -201,15 +217,23 @@ result <- pipeline_aoi_to_landcover(
 
 ## Modèles pré-entraînés disponibles
 
-| Modèle | Encodeur | Décodeur | Tâche |
+### FLAIR-INC (simples, recommandés pour tester)
+
+| Modèle HF | Entrée | Classes | Encodeur |
 |---|---|---|---|
-| `FLAIR-HUB_LC-G_utae` | U-TAE | UperFuse | OCS (multimodal) |
-| `FLAIR-HUB_LC-A_swin-tiny-unet` | Swin-T | UNet | OCS (aérien) |
-| `FLAIR-HUB_LC-A_swin-small-unet` | Swin-S | UNet | OCS (aérien) |
-| `FLAIR-HUB_LC-A_swin-base-unet` | Swin-B | UNet | OCS (aérien) |
-| `FLAIR-HUB_LC-A_swin-large-unet` | Swin-L | UNet | OCS (aérien) |
-| `FLAIR-HUB_LC-A_convnextv2-tiny-unet` | ConvNeXTV2-T | UNet | OCS (aérien) |
-| `FLAIR-HUB_LC-A_convnextv2-base-unet` | ConvNeXTV2-B | UNet | OCS (aérien) |
+| `IGNF/FLAIR-INC_rgbi_15cl_resnet34-unet` | RGBI (4 bandes) | 15 | ResNet34-UNet |
+| `IGNF/FLAIR-INC_rgbie_15cl_resnet34-unet` | RGBI+E (5 bandes) | 15 | ResNet34-UNet |
+| `IGNF/FLAIR-INC_rgb_15cl_resnet34-unet` | RGB (3 bandes) | 15 | ResNet34-UNet |
+| `IGNF/FLAIR-INC_rgb_12cl_resnet34-unet` | RGB (3 bandes) | 12 | ResNet34-UNet |
+
+### FLAIR-HUB (multimodaux, plus performants)
+
+| Modèle HF | Encodeur | Décodeur | Entrée |
+|---|---|---|---|
+| `IGNF/FLAIR-HUB_LC-G_utae` | U-TAE | UperFuse | Multimodal (S2 SITS) |
+| `IGNF/FLAIR-HUB_LC-A_IR_convnextv2tiny-upernet` | ConvNeXTV2-T | UPerNet | Aérien RGBI |
+
+Collection complète : [huggingface.co/collections/IGNF/flair-models](https://huggingface.co/collections/IGNF/flair-models-684035e78bd5bff99199ff87)
 
 ## Références
 

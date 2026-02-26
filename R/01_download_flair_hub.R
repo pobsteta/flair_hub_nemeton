@@ -485,6 +485,61 @@ hf_git_clone <- function(dest_dir = file.path(DATA_DIR_HF, "FLAIR-HUB"),
   return(invisible(dest_dir))
 }
 
+#' Télécharger le TOY DATASET FLAIR-HUB (petit jeu de données de test)
+#'
+#' Télécharge et décompresse le jeu de données jouet (~quelques Mo)
+#' fourni par l'IGN pour tester le pipeline sans télécharger le dataset complet.
+#'
+#' @param dest_dir Répertoire de destination
+#' @param overwrite Écraser si déjà présent
+#' @return Chemin du répertoire décompressé
+download_toy_dataset <- function(dest_dir = DATA_DIR_HF, overwrite = FALSE) {
+  toy_url <- paste0(
+    "https://huggingface.co/datasets/IGNF/FLAIR-HUB/resolve/main/",
+    "FLAIR-HUB_TOY_DATASET.zip"
+  )
+  zip_path <- file.path(dest_dir, "FLAIR-HUB_TOY_DATASET.zip")
+  toy_dir <- file.path(dest_dir, "FLAIR-HUB_TOY_DATASET")
+
+  if (dir.exists(toy_dir) && !overwrite) {
+    message("Toy dataset déjà présent: ", toy_dir)
+    return(invisible(toy_dir))
+  }
+
+  dir_create(dest_dir)
+  message("=== Téléchargement du TOY DATASET FLAIR-HUB ===")
+  message("URL: ", toy_url)
+
+  headers <- list()
+  token <- Sys.getenv("HF_TOKEN", unset = "")
+  if (nchar(token) > 0) {
+    headers[["Authorization"]] <- paste("Bearer", token)
+  }
+
+  tryCatch({
+    curl_download(
+      url = toy_url,
+      destfile = zip_path,
+      handle = new_handle(.list = headers),
+      quiet = FALSE
+    )
+    message("Décompression...")
+    unzip(zip_path, exdir = dest_dir)
+    message("TOY DATASET: ", toy_dir)
+
+    # Lister le contenu
+    toy_files <- dir_ls(toy_dir, recurse = TRUE, glob = "*.tif")
+    message(sprintf("  %d fichier(s) .tif trouvé(s)", length(toy_files)))
+
+    return(invisible(toy_dir))
+  }, error = function(e) {
+    warning("Échec: ", e$message)
+    message("Le fichier n'est peut-être pas accessible sans token.")
+    message("Configurez: Sys.setenv(HF_TOKEN = 'hf_votre_token')")
+    return(NULL)
+  })
+}
+
 # ==============================================================================
 # B. Chargement des différentes modalités
 # ==============================================================================
