@@ -248,10 +248,17 @@ download_ortho_for_aoi <- function(aoi, output_dir, res_m = RES_IGN) {
 # ==============================================================================
 # 2b. Téléchargement du MNT/MNS IGN via WCS (RGE ALTI® 1m)
 # ==============================================================================
-# Le MNT (DTM, terrain nu) et MNS (DSM, surface avec bâtiments/végétation)
-# sont disponibles à 1m via le WCS de la Géoplateforme IGN.
-#
 # FLAIR-HUB attend 2 bandes : DSM (MNS) + DTM (MNT) en Float32.
+#
+# Dans FLAIR-HUB original :
+#   - DSM (MNS) = résolution native 0.2m (corrélation dense des photos aériennes)
+#   - DTM (MNT) = RGE ALTI natif à 1m, rééchantillonné à 0.2m
+#
+# Via la Géoplateforme IGN WCS :
+#   - MNT (DTM) : ELEVATION.ELEVATIONGRIDCOVERAGE.HIGHRES → RGE ALTI 1m
+#   - MNS (DSM) : ELEVATION.ELEVATIONGRIDCOVERAGE.HIGHRES.MNS → si disponible
+#     (couverture LiDAR HD en cours de déploiement, pas disponible partout)
+#
 # Le CHM (Canopy Height Model) = DSM - DTM est utile pour distinguer
 # les classes arborées (feuillu, conifère) des classes basses (herbacé).
 
@@ -386,18 +393,27 @@ download_dem_for_aoi <- function(aoi, output_dir, res_m = 1, rgbi = NULL) {
   bbox <- as.numeric(st_bbox(st_union(aoi)))
   message(sprintf("\n=== Téléchargement MNT/MNS IGN (RGE ALTI %dm) ===", res_m))
 
-  # MNT (DTM - terrain nu)
-  message("\n--- MNT (DTM, terrain nu) ---")
+  # MNT (DTM - terrain nu) — disponible partout en France (RGE ALTI)
+  message("\n--- MNT (DTM, terrain nu, RGE ALTI) ---")
   dtm <- download_elevation_tiled(
     bbox, coverage_id = IGN_COV_MNT, res_m = res_m,
     output_dir = output_dir, prefix = "mnt"
   )
 
   # MNS (DSM - surface avec bâtiments/végétation)
-  message("\n--- MNS (DSM, surface) ---")
-  dsm <- download_elevation_tiled(
-    bbox, coverage_id = IGN_COV_MNS, res_m = res_m,
-    output_dir = output_dir, prefix = "mns"
+  # Note : la couverture MNS LiDAR HD est en cours de déploiement.
+  # Elle n'est pas encore disponible partout en France.
+  message("\n--- MNS (DSM, surface, LiDAR HD) ---")
+  message("  Note : le MNS n'est pas disponible partout (LiDAR HD en cours)")
+  dsm <- tryCatch(
+    download_elevation_tiled(
+      bbox, coverage_id = IGN_COV_MNS, res_m = res_m,
+      output_dir = output_dir, prefix = "mns"
+    ),
+    error = function(e) {
+      message("  MNS non disponible pour cette zone: ", e$message)
+      NULL
+    }
   )
 
   # Découper aux limites de l'AOI
@@ -406,9 +422,12 @@ download_dem_for_aoi <- function(aoi, output_dir, res_m = 1, rgbi = NULL) {
   if (!is.null(dtm)) dtm <- crop(dtm, aoi_vect)
   if (!is.null(dsm)) dsm <- crop(dsm, aoi_vect)
 
-  # Si le MNS n'est pas disponible, utiliser le MNT pour les 2 bandes
+  # Si le MNS n'est pas disponible, utiliser le MNT seul
+  # (DSM = DTM → CHM = 0, pas d'info de hauteur mais on garde l'altitude)
   if (is.null(dsm) && !is.null(dtm)) {
-    message("MNS non disponible, utilisation du MNT seul (DSM = DTM)")
+    message("\nMNS non disponible pour cette zone.")
+    message("Utilisation du MNT seul (DSM = DTM, CHM = 0).")
+    message("Le modèle bénéficiera quand même de l'altitude du terrain.")
     dsm <- dtm
   }
   if (is.null(dtm) && !is.null(dsm)) {
@@ -438,17 +457,26 @@ download_dem_for_aoi <- function(aoi, output_dir, res_m = 1, rgbi = NULL) {
   # Sauvegarder
   dem_path <- file.path(output_dir, "dem_dsm_dtm.tif")
   writeRaster(dem, dem_path, overwrite = TRUE, gdal = c("COMPRESS=LZW"))
+
+  has_chm <- !is.null(dsm) && !identical(dsm, dtm)
   message(sprintf("\nDEM: %s (%d x %d px, bandes: DSM + DTM)",
                    dem_path, ncol(dem), nrow(dem)))
+  if (has_chm) {
+    message("  Sources: DSM = MNS LiDAR HD, DTM = RGE ALTI")
+  } else {
+    message("  Sources: DSM = DTM = RGE ALTI (MNS non disponible)")
+  }
 
   # Statistiques
-  chm <- dem[["DSM"]] - dem[["DTM"]]
   message(sprintf("  Altitude DTM: %.0f - %.0f m",
                    min(values(dem[["DTM"]]), na.rm = TRUE),
                    max(values(dem[["DTM"]]), na.rm = TRUE)))
-  message(sprintf("  Hauteur CHM (DSM-DTM): %.1f - %.1f m",
-                   min(values(chm), na.rm = TRUE),
-                   max(values(chm), na.rm = TRUE)))
+  if (has_chm) {
+    chm <- dem[["DSM"]] - dem[["DTM"]]
+    message(sprintf("  Hauteur CHM (DSM-DTM): %.1f - %.1f m",
+                     min(values(chm), na.rm = TRUE),
+                     max(values(chm), na.rm = TRUE)))
+  }
 
   return(list(dem = dem, dem_path = dem_path))
 }
