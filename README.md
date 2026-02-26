@@ -189,21 +189,19 @@ landcover <- predict_landcover_from_aerial("data/ign/ortho_rgbi.tif", model_path
 ```r
 source("R/04_pipeline_aoi_to_landcover.R")
 
-# Lancer le pipeline avec un fichier GeoPackage
+# Config LC-A : RGBI seul (64.1% mIoU, rapide)
 result <- pipeline_aoi_to_landcover("data/aoi.gpkg")
 
-# Avec des options
-result <- pipeline_aoi_to_landcover(
-  aoi_path    = "chemin/vers/ma_zone.gpkg",
-  output_dir  = "outputs",
-  model_name  = "FLAIR-INC_rgbi_15cl_resnet34-unet"
-)
+# Config LC-B : RGBI + MNT à 1m (65.1% mIoU, +1pt, recommandé)
+result <- pipeline_aoi_to_landcover("data/aoi.gpkg",
+  use_dem = TRUE, dem_res_m = 1)
 
 # Le résultat contient :
 # result$ortho_rvb   - Ortho RVB (0.20m)
 # result$ortho_irc   - Ortho IRC (0.20m)
 # result$ortho_rgbi  - Ortho RGBI 4 bandes (0.20m)
 # result$ndvi        - NDVI
+# result$dem         - MNT DSM+DTM (si use_dem=TRUE)
 # result$landcover   - Carte d'occupation du sol
 ```
 
@@ -214,6 +212,7 @@ result <- pipeline_aoi_to_landcover(
 | `ortho_rvb.tif` | Ortho RVB IGN (0.20m) |
 | `ortho_irc.tif` | Ortho IRC IGN (0.20m) |
 | `ortho_rgbi.tif` | Ortho RGBI 4 bandes (0.20m) |
+| `dem_dsm_dtm.tif` | MNT DSM+DTM rééchantillonné à 0.2m (si `use_dem=TRUE`) |
 | `ndvi.tif` | NDVI calculé depuis l'IRC |
 | `landcover_predicted.tif` | Carte d'occupation du sol prédite |
 | `resultats_aoi_flair_hub.pdf` | Visualisation récapitulative (4 panneaux) |

@@ -31,8 +31,11 @@ library(curl)
 
 # --- IGN Géoplateforme ---
 IGN_WMS_URL      <- "https://data.geopf.fr/wms-r"
+IGN_WCS_URL      <- "https://data.geopf.fr/wcs"
 IGN_LAYER_ORTHO  <- "ORTHOIMAGERY.ORTHOPHOTOS"
 IGN_LAYER_IRC    <- "ORTHOIMAGERY.ORTHOPHOTOS.IRC-EXPRESS.2024"
+IGN_COV_MNT      <- "ELEVATION.ELEVATIONGRIDCOVERAGE.HIGHRES"
+IGN_COV_MNS      <- "ELEVATION.ELEVATIONGRIDCOVERAGE.HIGHRES.MNS"
 
 # --- Résolutions ---
 RES_IGN <- 0.2   # BD ORTHO® IGN
@@ -240,6 +243,214 @@ download_ortho_for_aoi <- function(aoi, output_dir, res_m = RES_IGN) {
 
   return(list(rvb = rvb, irc = irc,
               rvb_path = rvb_path, irc_path = irc_path))
+}
+
+# ==============================================================================
+# 2b. Téléchargement du MNT/MNS IGN via WCS (RGE ALTI® 1m)
+# ==============================================================================
+# Le MNT (DTM, terrain nu) et MNS (DSM, surface avec bâtiments/végétation)
+# sont disponibles à 1m via le WCS de la Géoplateforme IGN.
+#
+# FLAIR-HUB attend 2 bandes : DSM (MNS) + DTM (MNT) en Float32.
+# Le CHM (Canopy Height Model) = DSM - DTM est utile pour distinguer
+# les classes arborées (feuillu, conifère) des classes basses (herbacé).
+
+#' Télécharger une couverture WCS IGN (MNT ou MNS)
+#'
+#' @param bbox Emprise c(xmin, ymin, xmax, ymax) en Lambert-93
+#' @param coverage_id Identifiant de la couverture WCS
+#' @param res_m Résolution en mètres (1 = RGE ALTI 1m)
+#' @param dest_file Fichier de destination
+#' @return SpatRaster ou NULL si échec
+download_wcs_coverage <- function(bbox, coverage_id, res_m = 1, dest_file) {
+  xmin <- bbox[1]; ymin <- bbox[2]; xmax <- bbox[3]; ymax <- bbox[4]
+
+  # WCS 2.0.1 GetCoverage
+  wcs_url <- paste0(
+    IGN_WCS_URL, "?",
+    "SERVICE=WCS&VERSION=2.0.1&REQUEST=GetCoverage",
+    "&CoverageId=", coverage_id,
+    "&SUBSET=x(", xmin, ",", xmax, ")",
+    "&SUBSET=y(", ymin, ",", ymax, ")",
+    "&SUBSETTINGCRS=http://www.opengis.net/def/crs/EPSG/0/2154",
+    "&OUTPUTCRS=http://www.opengis.net/def/crs/EPSG/0/2154",
+    "&FORMAT=image/tiff"
+  )
+
+  tryCatch({
+    tmp_file <- tempfile(fileext = ".tif")
+    curl_download(url = wcs_url, destfile = tmp_file, quiet = TRUE)
+
+    # Vérifier que c'est bien un GeoTIFF (pas une erreur XML)
+    fsize <- file.info(tmp_file)$size
+    if (fsize < 1000) {
+      raw <- readLines(tmp_file, n = 5, warn = FALSE)
+      if (any(grepl("Exception|Error|xml", raw, ignore.case = TRUE))) {
+        warning("Erreur WCS pour ", coverage_id, " : ", paste(raw, collapse = " "))
+        unlink(tmp_file)
+        return(NULL)
+      }
+    }
+
+    r <- rast(tmp_file)
+    writeRaster(r, dest_file, overwrite = TRUE)
+    r <- rast(dest_file)
+    unlink(tmp_file)
+
+    return(r)
+  }, error = function(e) {
+    unlink(tmp_file)
+    warning("Échec WCS (", coverage_id, "): ", e$message)
+    return(NULL)
+  })
+}
+
+#' Télécharger le MNT et le MNS IGN pour une emprise (avec tuilage WCS)
+#'
+#' Le WCS a une limite de taille par requête (~2048x2048 pixels à 1m).
+#' On tuilage les requêtes si nécessaire.
+#'
+#' @param bbox Emprise c(xmin, ymin, xmax, ymax)
+#' @param coverage_id Couverture WCS
+#' @param res_m Résolution (1m par défaut)
+#' @param output_dir Répertoire de sortie
+#' @param prefix Préfixe des fichiers
+#' @return SpatRaster
+download_elevation_tiled <- function(bbox, coverage_id, res_m = 1,
+                                      output_dir, prefix = "elev") {
+  xmin <- bbox[1]; ymin <- bbox[2]; xmax <- bbox[3]; ymax <- bbox[4]
+  wcs_max_px <- 2048
+  tile_size_m <- wcs_max_px * res_m
+
+  x_starts <- seq(xmin, xmax, by = tile_size_m)
+  y_starts <- seq(ymin, ymax, by = tile_size_m)
+  n_tiles <- length(x_starts) * length(y_starts)
+  message(sprintf("Téléchargement %s (%s): %d tuile(s) WCS à %dm...",
+                   prefix, coverage_id, n_tiles, res_m))
+
+  tile_rasters <- list()
+  idx <- 1
+
+  for (x0 in x_starts) {
+    for (y0 in y_starts) {
+      x1 <- min(x0 + tile_size_m, xmax)
+      y1 <- min(y0 + tile_size_m, ymax)
+
+      if ((x1 - x0) < res_m * 2 || (y1 - y0) < res_m * 2) next
+
+      tile_bbox <- c(x0, y0, x1, y1)
+      tile_file <- file.path(output_dir,
+                              sprintf("%s_tile_%03d.tif", prefix, idx))
+
+      message(sprintf("  Tuile %d/%d...", idx, n_tiles))
+      r <- download_wcs_coverage(tile_bbox, coverage_id, res_m, tile_file)
+      if (!is.null(r)) {
+        tile_rasters[[idx]] <- r
+      }
+      idx <- idx + 1
+    }
+  }
+
+  if (length(tile_rasters) == 0) {
+    warning("Aucune tuile WCS téléchargée pour ", coverage_id)
+    return(NULL)
+  }
+
+  if (length(tile_rasters) == 1) {
+    mosaic <- tile_rasters[[1]]
+  } else {
+    message("Mosaïquage de ", length(tile_rasters), " tuiles ", prefix, "...")
+    mosaic <- do.call(merge, tile_rasters)
+  }
+
+  # Nettoyer les tuiles temporaires
+  tile_files <- dir_ls(output_dir, glob = paste0("*", prefix, "_tile_*.tif"))
+  if (length(tile_files) > 0) file_delete(tile_files)
+
+  return(mosaic)
+}
+
+#' Télécharger le DEM (DSM + DTM) pour une AOI
+#'
+#' Télécharge le MNS (DSM) et le MNT (DTM) depuis le WCS IGN (RGE ALTI 1m)
+#' et les combine en un SpatRaster 2 bandes comme attendu par FLAIR-HUB.
+#'
+#' @param aoi sf object en Lambert-93
+#' @param output_dir Répertoire de sortie
+#' @param res_m Résolution du MNT (1 = RGE ALTI 1m, 5 = BD ALTI 5m)
+#' @param rgbi SpatRaster de référence pour le rééchantillonnage à 0.2m
+#' @return Liste avec dem (SpatRaster 2 bandes DSM+DTM) et dem_path
+download_dem_for_aoi <- function(aoi, output_dir, res_m = 1, rgbi = NULL) {
+  dir_create(output_dir)
+
+  bbox <- as.numeric(st_bbox(st_union(aoi)))
+  message(sprintf("\n=== Téléchargement MNT/MNS IGN (RGE ALTI %dm) ===", res_m))
+
+  # MNT (DTM - terrain nu)
+  message("\n--- MNT (DTM, terrain nu) ---")
+  dtm <- download_elevation_tiled(
+    bbox, coverage_id = IGN_COV_MNT, res_m = res_m,
+    output_dir = output_dir, prefix = "mnt"
+  )
+
+  # MNS (DSM - surface avec bâtiments/végétation)
+  message("\n--- MNS (DSM, surface) ---")
+  dsm <- download_elevation_tiled(
+    bbox, coverage_id = IGN_COV_MNS, res_m = res_m,
+    output_dir = output_dir, prefix = "mns"
+  )
+
+  # Découper aux limites de l'AOI
+  aoi_vect <- vect(st_union(aoi))
+
+  if (!is.null(dtm)) dtm <- crop(dtm, aoi_vect)
+  if (!is.null(dsm)) dsm <- crop(dsm, aoi_vect)
+
+  # Si le MNS n'est pas disponible, utiliser le MNT pour les 2 bandes
+  if (is.null(dsm) && !is.null(dtm)) {
+    message("MNS non disponible, utilisation du MNT seul (DSM = DTM)")
+    dsm <- dtm
+  }
+  if (is.null(dtm) && !is.null(dsm)) {
+    message("MNT non disponible, utilisation du MNS seul (DTM = DSM)")
+    dtm <- dsm
+  }
+  if (is.null(dtm) && is.null(dsm)) {
+    warning("Aucune donnée d'élévation téléchargée.")
+    return(NULL)
+  }
+
+  # Aligner les grilles DSM et DTM
+  if (!compareGeom(dsm, dtm, stopOnError = FALSE)) {
+    dsm <- resample(dsm, dtm, method = "bilinear")
+  }
+
+  # Combiner en SpatRaster 2 bandes (format FLAIR-HUB DEM_ELEV)
+  dem <- c(dsm[[1]], dtm[[1]])
+  names(dem) <- c("DSM", "DTM")
+
+  # Rééchantillonner vers la grille aérienne (0.2m) si fournie
+  if (!is.null(rgbi)) {
+    message("Rééchantillonnage MNT/MNS de ", res_m, "m vers 0.2m...")
+    dem <- resample(dem, rgbi, method = "bilinear")
+  }
+
+  # Sauvegarder
+  dem_path <- file.path(output_dir, "dem_dsm_dtm.tif")
+  writeRaster(dem, dem_path, overwrite = TRUE, gdal = c("COMPRESS=LZW"))
+  message(sprintf("\nDEM: %s (%d x %d px, bandes: DSM + DTM)",
+                   dem_path, ncol(dem), nrow(dem)))
+
+  # Statistiques
+  chm <- dem[["DSM"]] - dem[["DTM"]]
+  message(sprintf("  Altitude DTM: %.0f - %.0f m",
+                   min(values(dem[["DTM"]]), na.rm = TRUE),
+                   max(values(dem[["DTM"]]), na.rm = TRUE)))
+  message(sprintf("  Hauteur CHM (DSM-DTM): %.1f - %.1f m",
+                   min(values(chm), na.rm = TRUE),
+                   max(values(chm), na.rm = TRUE)))
+
+  return(list(dem = dem, dem_path = dem_path))
 }
 
 # ==============================================================================
@@ -466,36 +677,61 @@ run_inference <- function(rgbi, model_path) {
 # 5. Pipeline principal
 # ==============================================================================
 
-#' Pipeline complet : AOI → Ortho IGN → Carte d'occupation du sol
+#' Pipeline complet : AOI → Ortho IGN (+MNT) → Carte d'occupation du sol
 #'
 #' @param aoi_path Chemin vers le fichier aoi.gpkg
 #' @param output_dir Répertoire de sortie
 #' @param model_name Nom du modèle FLAIR-HUB
 #' @param model_path Chemin local vers un modèle (optionnel)
-#' @param res_m Résolution de téléchargement IGN
+#' @param res_m Résolution de téléchargement ortho IGN (0.2m)
+#' @param use_dem Télécharger et utiliser le MNT/MNS IGN (config LC-B, +1pt mIoU)
+#' @param dem_res_m Résolution du MNT (1 = RGE ALTI 1m, 5 = BD ALTI 5m)
 #' @return Liste avec tous les résultats
 pipeline_aoi_to_landcover <- function(aoi_path,
                                         output_dir = file.path(getwd(), "outputs"),
                                         model_name = "FLAIR-INC_rgbi_15cl_resnet34-unet",
                                         model_path = NULL,
-                                        res_m = RES_IGN) {
+                                        res_m = RES_IGN,
+                                        use_dem = FALSE,
+                                        dem_res_m = 1) {
   dir_create(output_dir)
   t0 <- Sys.time()
 
+  config_label <- if (use_dem) "LC-B (RGBI + MNT)" else "LC-A (RGBI seul)"
+  n_steps <- if (use_dem) 6 else 5
+
   message("##############################################################")
   message("#  Pipeline FLAIR-HUB : AOI → Ortho IGN → Occupation du sol  #")
+  message(sprintf("#  Configuration: %s", config_label))
   message("##############################################################\n")
 
   # --- Étape 1 : Charger l'AOI ---
-  message(">>> ÉTAPE 1/5 : Chargement de l'AOI")
+  message(sprintf(">>> ÉTAPE 1/%d : Chargement de l'AOI", n_steps))
   aoi <- load_aoi(aoi_path)
 
   # --- Étape 2 : Télécharger les ortho IGN ---
-  message("\n>>> ÉTAPE 2/5 : Téléchargement des ortho IGN (RVB + IRC)")
+  message(sprintf("\n>>> ÉTAPE 2/%d : Téléchargement des ortho IGN (RVB + IRC)", n_steps))
   ortho <- download_ortho_for_aoi(aoi, output_dir = output_dir, res_m = res_m)
 
-  # --- Étape 3 : Configurer Python + modèle ---
-  message("\n>>> ÉTAPE 3/5 : Configuration Python + téléchargement modèle")
+  # Combiner RVB + IRC en RGBI
+  rgbi <- combine_rvb_irc(ortho$rvb, ortho$irc)
+  rgbi_path <- file.path(output_dir, "ortho_rgbi.tif")
+  writeRaster(rgbi, rgbi_path, overwrite = TRUE)
+
+  # --- Étape 2b : Télécharger le MNT/MNS (optionnel, config LC-B) ---
+  dem_data <- NULL
+  if (use_dem) {
+    step_dem <- 3
+    message(sprintf("\n>>> ÉTAPE %d/%d : Téléchargement MNT/MNS IGN (RGE ALTI %dm)",
+                     step_dem, n_steps, dem_res_m))
+    dem_data <- download_dem_for_aoi(aoi, output_dir = output_dir,
+                                      res_m = dem_res_m, rgbi = rgbi)
+  }
+
+  # --- Étape 3/4 : Configurer Python + modèle ---
+  step_py <- if (use_dem) 4 else 3
+  message(sprintf("\n>>> ÉTAPE %d/%d : Configuration Python + téléchargement modèle",
+                   step_py, n_steps))
   setup_python()
   if (is.null(model_path)) {
     model_path <- download_model(model_name)
@@ -503,19 +739,16 @@ pipeline_aoi_to_landcover <- function(aoi_path,
     message("Utilisation du modèle local: ", model_path)
   }
 
-  # --- Étape 4 : Inférence ---
-  message("\n>>> ÉTAPE 4/5 : Inférence du modèle ", model_name)
+  # --- Étape 4/5 : Inférence ---
+  step_inf <- if (use_dem) 5 else 4
+  message(sprintf("\n>>> ÉTAPE %d/%d : Inférence du modèle %s",
+                   step_inf, n_steps, model_name))
 
-  # Combiner RVB + IRC en RGBI
-  rgbi <- combine_rvb_irc(ortho$rvb, ortho$irc)
-  rgbi_path <- file.path(output_dir, "ortho_rgbi.tif")
-  writeRaster(rgbi, rgbi_path, overwrite = TRUE)
-
-  # Inférence
   landcover <- run_inference(rgbi, model_path)
 
-  # --- Étape 5 : Export ---
-  message("\n>>> ÉTAPE 5/5 : Export des résultats")
+  # --- Étape 5/6 : Export ---
+  step_exp <- if (use_dem) 6 else 5
+  message(sprintf("\n>>> ÉTAPE %d/%d : Export des résultats", step_exp, n_steps))
 
   # Carte d'occupation du sol
   lc_path <- file.path(output_dir, "landcover_predicted.tif")
@@ -533,9 +766,15 @@ pipeline_aoi_to_landcover <- function(aoi_path,
 
   # --- Visualisation récapitulative ---
   pdf_path <- file.path(output_dir, "resultats_aoi_flair_hub.pdf")
-  pdf(pdf_path, width = 16, height = 12)
+  n_panels <- if (use_dem && !is.null(dem_data)) 6 else 4
+  pdf_w <- if (n_panels > 4) 18 else 16
+  pdf(pdf_path, width = pdf_w, height = 12)
 
-  par(mfrow = c(2, 2), mar = c(2, 2, 3, 4))
+  if (n_panels > 4) {
+    par(mfrow = c(2, 3), mar = c(2, 2, 3, 4))
+  } else {
+    par(mfrow = c(2, 2), mar = c(2, 2, 3, 4))
+  }
 
   # RVB
   plotRGB(ortho$rvb, r = 1, g = 2, b = 3, stretch = "lin",
@@ -553,8 +792,26 @@ pipeline_aoi_to_landcover <- function(aoi_path,
   plot(ndvi, main = "NDVI (depuis IRC)", col = col_ndvi,
        range = c(-0.2, 1), plg = list(title = "NDVI"))
 
+  # MNT si disponible
+  if (!is.null(dem_data)) {
+    col_elev <- colorRampPalette(
+      c("#313695", "#4575b4", "#74add1", "#abd9e9", "#fee090",
+        "#fdae61", "#f46d43", "#d73027", "#a50026")
+    )(100)
+    plot(dem_data$dem[["DTM"]], main = sprintf("MNT IGN (RGE ALTI %dm)", dem_res_m),
+         col = col_elev, plg = list(title = "Altitude (m)"))
+
+    chm <- dem_data$dem[["DSM"]] - dem_data$dem[["DTM"]]
+    col_chm <- colorRampPalette(
+      c("#ffffcc", "#d9f0a3", "#addd8e", "#78c679",
+        "#41ab5d", "#238443", "#005a32")
+    )(100)
+    plot(chm, main = "CHM (DSM - DTM)",
+         col = col_chm, plg = list(title = "Hauteur (m)"))
+  }
+
   # Occupation du sol
-  plot(landcover, main = paste("Occupation du sol -", model_name),
+  plot(landcover, main = paste("Occupation du sol -", config_label),
        col = COSIA_COLORS_15, type = "classes",
        levels = COSIA_LABELS_15,
        plg = list(legend = COSIA_LABELS_15, cex = 0.6))
@@ -579,11 +836,12 @@ pipeline_aoi_to_landcover <- function(aoi_path,
 
   message("\n##############################################################")
   message("#  Pipeline terminé en ", dt, " minutes")
+  message(sprintf("#  Configuration: %s", config_label))
   message(sprintf("#  Classes uniques: %d", length(class_counts)))
   message(sprintf("#  Fichiers dans: %s", output_dir))
   message("##############################################################")
 
-  return(list(
+  result <- list(
     aoi        = aoi,
     ortho_rvb  = ortho$rvb,
     ortho_irc  = ortho$irc,
@@ -591,7 +849,10 @@ pipeline_aoi_to_landcover <- function(aoi_path,
     ndvi       = ndvi,
     landcover  = landcover,
     output_dir = output_dir
-  ))
+  )
+  if (!is.null(dem_data)) result$dem <- dem_data$dem
+
+  return(result)
 }
 
 # ==============================================================================
@@ -607,7 +868,13 @@ if (sys.nframe() == 0) {
     message("Fichier AOI non trouvé: ", aoi_path)
     message("\nUtilisation:")
     message('  source("R/04_pipeline_aoi_to_landcover.R")')
-    message('  result <- pipeline_aoi_to_landcover("chemin/vers/aoi.gpkg")')
+    message("")
+    message('  # Config LC-A : RGBI seul (64.1% mIoU)')
+    message('  result <- pipeline_aoi_to_landcover("data/aoi.gpkg")')
+    message("")
+    message('  # Config LC-B : RGBI + MNT (65.1% mIoU, +1pt)')
+    message('  result <- pipeline_aoi_to_landcover("data/aoi.gpkg",')
+    message('    use_dem = TRUE, dem_res_m = 1)')
     message("")
     message('  # Avec un modèle local :')
     message('  result <- pipeline_aoi_to_landcover("data/aoi.gpkg",')
