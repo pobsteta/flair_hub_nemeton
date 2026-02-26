@@ -186,12 +186,13 @@ test_wms_layer <- function(bbox, layer) {
   xmax <- xmin + 200
   ymax <- ymin + 200
 
+  # WMS 1.3.0 + EPSG:2154 (projected CRS) : BBOX = xmin,ymin,xmax,ymax
   wms_url <- paste0(
     IGN_WMS_URL, "?",
     "SERVICE=WMS&VERSION=1.3.0&REQUEST=GetMap",
     "&LAYERS=", layer,
     "&CRS=EPSG:2154",
-    "&BBOX=", paste(ymin, xmin, ymax, xmax, sep = ","),
+    "&BBOX=", paste(xmin, ymin, xmax, ymax, sep = ","),
     "&WIDTH=2&HEIGHT=2",
     "&FORMAT=image/geotiff",
     "&STYLES="
@@ -259,18 +260,21 @@ download_wms_tile <- function(bbox, layer, res_m = RES_IGN, dest_file,
   width  <- round((xmax - xmin) / res_m)
   height <- round((ymax - ymin) / res_m)
 
-  # WMS 1.3.0 avec CRS EPSG:2154 : BBOX = ymin,xmin,ymax,xmax
+  # WMS 1.3.0 + EPSG:2154 (projected CRS) : BBOX = xmin,ymin,xmax,ymax
+  # (axis order follows the CRS definition: Easting first, Northing second)
   wms_url <- paste0(
     IGN_WMS_URL, "?",
     "SERVICE=WMS&VERSION=1.3.0&REQUEST=GetMap",
     "&LAYERS=", layer,
     "&CRS=EPSG:2154",
-    "&BBOX=", paste(ymin, xmin, ymax, xmax, sep = ","),
+    "&BBOX=", paste(xmin, ymin, xmax, ymax, sep = ","),
     "&WIDTH=", width,
     "&HEIGHT=", height,
     "&FORMAT=image/geotiff",
     "&STYLES=", styles
   )
+
+  message("  WMS URL: ", wms_url)
 
   tryCatch({
     tmp_file <- tempfile(fileext = ".tif")
@@ -789,7 +793,10 @@ print(f"Prédit: {np.unique(pred).shape[0]} classes")
     warning("Erreur inférence: ", e$message)
     return(NULL)
   }, finally = {
-    unlink(c(tmp_in, tmp_out))
+    # Only delete the input file. The output tmp_out must persist because
+    # the returned SpatRaster is file-backed and terra needs the file
+    # until after the merge/mosaic step. R cleans up tempdir() on exit.
+    unlink(tmp_in)
   })
 }
 
