@@ -196,6 +196,12 @@ download_ign_tiled <- function(bbox, layer, res_m = RES_IGN,
     mosaic <- do.call(merge, tile_rasters)
   }
 
+  # Sauvegarder le mosaïque dans un fichier consolidé, puis re-lire
+  # pour décorréler des fichiers tuiles (terra est file-backed)
+  mosaic_file <- file.path(output_dir, paste0(prefix, "_mosaic.tif"))
+  writeRaster(mosaic, mosaic_file, overwrite = TRUE)
+  mosaic <- rast(mosaic_file)
+
   return(mosaic)
 }
 
@@ -228,18 +234,24 @@ download_ortho_for_aoi <- function(aoi, output_dir, res_m = RES_IGN) {
   rvb <- crop(rvb, aoi_vect)
   irc <- crop(irc, aoi_vect)
 
-  # Sauvegarder
+  # Sauvegarder et re-lire pour décorréler du fichier tuile source
+  # (terra SpatRaster est file-backed : sans rast(), l'objet pointe
+  #  encore vers le fichier tuile qui sera supprimé ensuite)
   rvb_path <- file.path(output_dir, "ortho_rvb.tif")
   irc_path <- file.path(output_dir, "ortho_irc.tif")
   writeRaster(rvb, rvb_path, overwrite = TRUE)
+  rvb <- rast(rvb_path)
   writeRaster(irc, irc_path, overwrite = TRUE)
+  irc <- rast(irc_path)
 
   message(sprintf("\nRVB: %s (%d x %d px)", rvb_path, ncol(rvb), nrow(rvb)))
   message(sprintf("IRC: %s (%d x %d px)", irc_path, ncol(irc), nrow(irc)))
 
-  # Nettoyer les tuiles temporaires
+  # Nettoyer les fichiers temporaires (tuiles + mosaïques intermédiaires)
   tile_files <- dir_ls(output_dir, glob = "*_tile_*.tif")
   if (length(tile_files) > 0) file_delete(tile_files)
+  mosaic_files <- dir_ls(output_dir, glob = "*_mosaic.tif")
+  if (length(mosaic_files) > 0) file_delete(mosaic_files)
 
   return(list(rvb = rvb, irc = irc,
               rvb_path = rvb_path, irc_path = irc_path))
@@ -370,7 +382,13 @@ download_elevation_tiled <- function(bbox, coverage_id, res_m = 1,
     mosaic <- do.call(merge, tile_rasters)
   }
 
-  # Nettoyer les tuiles temporaires
+  # Sauvegarder le mosaïque dans un fichier consolidé, puis re-lire
+  # pour décorréler des fichiers tuiles (terra est file-backed)
+  mosaic_file <- file.path(output_dir, paste0(prefix, "_mosaic.tif"))
+  writeRaster(mosaic, mosaic_file, overwrite = TRUE)
+  mosaic <- rast(mosaic_file)
+
+  # Nettoyer les tuiles temporaires (le mosaïque est maintenant autonome)
   tile_files <- dir_ls(output_dir, glob = paste0("*", prefix, "_tile_*.tif"))
   if (length(tile_files) > 0) file_delete(tile_files)
 
@@ -454,9 +472,14 @@ download_dem_for_aoi <- function(aoi, output_dir, res_m = 1, rgbi = NULL) {
     dem <- resample(dem, rgbi, method = "bilinear")
   }
 
-  # Sauvegarder
+  # Sauvegarder et re-lire pour décorréler des fichiers mosaïques
   dem_path <- file.path(output_dir, "dem_dsm_dtm.tif")
   writeRaster(dem, dem_path, overwrite = TRUE, gdal = c("COMPRESS=LZW"))
+  dem <- rast(dem_path)
+
+  # Nettoyer les fichiers mosaïques temporaires (mnt_mosaic, mns_mosaic)
+  mosaic_files <- dir_ls(output_dir, glob = "*_mosaic.tif")
+  if (length(mosaic_files) > 0) file_delete(mosaic_files)
 
   has_chm <- !is.null(dsm) && !identical(dsm, dtm)
   message(sprintf("\nDEM: %s (%d x %d px, bandes: DSM + DTM)",
