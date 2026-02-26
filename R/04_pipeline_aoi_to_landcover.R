@@ -4,15 +4,21 @@
 # Pipeline complet : AOI (GeoPackage) → Données IGN → Carte d'occupation du sol
 #
 # Entrée  : fichier aoi.gpkg (zone d'intérêt, n'importe quel CRS)
-# Sorties : ortho_rgbi.tif, label_landcover.tif, label_crop.tif dans outputs/
+# Sorties : ortho_rgbi.tif, dem_dsm_dtm.tif, landcover_predicted.tif
 #
 # Workflow :
 #   1. Charger l'AOI depuis aoi.gpkg → reprojection Lambert-93
 #   2. Télécharger les ortho IGN RVB + IRC via WMS (tuiles si nécessaire)
+#   2b. Télécharger le MNT/MNS IGN via WCS (optionnel, config LC-B)
 #   3. Combiner RVB + IRC en image 4 bandes RGBI
 #   4. Découper en patches de 512x512 à 0.2m
 #   5. Inférence du modèle FLAIR-HUB (Swin/ConvNeXTV2) via reticulate
 #   6. Mosaïquer et exporter la carte d'occupation du sol
+#
+# Cache :
+#   Les fichiers téléchargés sont réutilisés s'ils existent déjà dans
+#   output_dir (ortho_rvb.tif, ortho_irc.tif, dem_dsm_dtm.tif).
+#   Pour forcer le re-téléchargement, supprimer ces fichiers.
 #
 # Modèles FLAIR-HUB :
 #   - Entrée : 4 bandes aérien (R, G, B, NIR) à 0.2m, patches 512x512
@@ -44,8 +50,9 @@ RES_IGN <- 0.2   # BD ORTHO® IGN
 PATCH_SIZE <- 512  # Taille des patches (512x512 px à 0.2m)
 CONDA_ENV  <- "FLAIRHUB"
 
-# --- Limites WMS ---
-WMS_MAX_PX <- 4096
+# --- Limites WMS/WCS ---
+WMS_MAX_PX <- 4096  # Taille max par requête WMS
+WCS_MAX_PX <- 2048  # Taille max par requête WCS
 
 # --- Classes CoSIA (palette officielle FLAIR-HUB) ---
 COSIA_LABELS_15 <- c(
@@ -107,12 +114,19 @@ load_aoi <- function(gpkg_path, layer = NULL) {
 # ==============================================================================
 
 #' Télécharger une tuile WMS IGN
+#'
+#' @param bbox c(xmin, ymin, xmax, ymax) en Lambert-93
+#' @param layer Couche WMS
+#' @param res_m Résolution en mètres
+#' @param dest_file Fichier de sortie
+#' @return SpatRaster ou NULL si échec
 download_wms_tile <- function(bbox, layer, res_m = RES_IGN, dest_file) {
   xmin <- bbox[1]; ymin <- bbox[2]; xmax <- bbox[3]; ymax <- bbox[4]
 
   width  <- round((xmax - xmin) / res_m)
   height <- round((ymax - ymin) / res_m)
 
+  # WMS 1.3.0 avec CRS EPSG:2154 : BBOX = ymin,xmin,ymax,xmax
   wms_url <- paste0(
     IGN_WMS_URL, "?",
     "SERVICE=WMS&VERSION=1.3.0&REQUEST=GetMap",
@@ -131,11 +145,13 @@ download_wms_tile <- function(bbox, layer, res_m = RES_IGN, dest_file) {
 
     r <- rast(tmp_file)
 
+    # Assigner le CRS et l'emprise si nécessaire
     if (is.na(crs(r)) || crs(r) == "") {
       crs(r) <- "EPSG:2154"
     }
     ext(r) <- ext(xmin, xmax, ymin, ymax)
 
+    # Écrire le fichier final et re-lire
     writeRaster(r, dest_file, overwrite = TRUE)
     r <- rast(dest_file)
     unlink(tmp_file)
@@ -148,7 +164,14 @@ download_wms_tile <- function(bbox, layer, res_m = RES_IGN, dest_file) {
   })
 }
 
-#' Télécharger une ortho IGN complète pour une emprise (avec tuilage)
+#' Télécharger une ortho IGN complète pour une emprise (avec tuilage automatique)
+#'
+#' @param bbox c(xmin, ymin, xmax, ymax) en Lambert-93
+#' @param layer Couche WMS (RVB ou IRC)
+#' @param res_m Résolution en mètres
+#' @param output_dir Répertoire de sortie
+#' @param prefix Préfixe pour les fichiers
+#' @return SpatRaster mosaïqué
 download_ign_tiled <- function(bbox, layer, res_m = RES_IGN,
                                 output_dir, prefix = "ortho") {
   xmin <- bbox[1]; ymin <- bbox[2]; xmax <- bbox[3]; ymax <- bbox[4]
@@ -196,18 +219,34 @@ download_ign_tiled <- function(bbox, layer, res_m = RES_IGN,
     mosaic <- do.call(merge, tile_rasters)
   }
 
-  # Sauvegarder le mosaïque dans un fichier consolidé, puis re-lire
-  # pour décorréler des fichiers tuiles (terra est file-backed)
-  mosaic_file <- file.path(output_dir, paste0(prefix, "_mosaic.tif"))
-  writeRaster(mosaic, mosaic_file, overwrite = TRUE)
-  mosaic <- rast(mosaic_file)
-
   return(mosaic)
 }
 
 #' Télécharger les ortho RVB et IRC pour une AOI
+#'
+#' Gestion du cache : si ortho_rvb.tif et ortho_irc.tif existent déjà,
+#' ils sont réutilisés sans re-téléchargement.
+#'
+#' @param aoi sf object (AOI en Lambert-93)
+#' @param output_dir Répertoire de sortie
+#' @param res_m Résolution en mètres
+#' @return Liste avec rvb (SpatRaster) et irc (SpatRaster)
 download_ortho_for_aoi <- function(aoi, output_dir, res_m = RES_IGN) {
   dir_create(output_dir)
+
+  rvb_path <- file.path(output_dir, "ortho_rvb.tif")
+  irc_path <- file.path(output_dir, "ortho_irc.tif")
+
+  # Cache : réutiliser les fichiers existants
+  if (file.exists(rvb_path) && file.exists(irc_path)) {
+    message("\n=== Ortho RVB et IRC déjà téléchargées (cache) ===")
+    rvb <- rast(rvb_path)
+    irc <- rast(irc_path)
+    message(sprintf("RVB: %s (%d x %d px)", rvb_path, ncol(rvb), nrow(rvb)))
+    message(sprintf("IRC: %s (%d x %d px)", irc_path, ncol(irc), nrow(irc)))
+    return(list(rvb = rvb, irc = irc,
+                rvb_path = rvb_path, irc_path = irc_path))
+  }
 
   bbox <- as.numeric(st_bbox(st_union(aoi)))
   message(sprintf("\n=== Téléchargement ortho IGN pour l'AOI ==="))
@@ -229,29 +268,29 @@ download_ortho_for_aoi <- function(aoi, output_dir, res_m = RES_IGN) {
                              output_dir = output_dir, prefix = "irc")
   names(irc)[1:min(3, nlyr(irc))] <- c("PIR", "Rouge", "Vert")[1:min(3, nlyr(irc))]
 
-  # Découper aux limites de l'AOI
+  # Découper aux limites exactes de l'AOI
   aoi_vect <- vect(st_union(aoi))
   rvb <- crop(rvb, aoi_vect)
   irc <- crop(irc, aoi_vect)
 
-  # Sauvegarder et re-lire pour décorréler du fichier tuile source
-  # (terra SpatRaster est file-backed : sans rast(), l'objet pointe
-  #  encore vers le fichier tuile qui sera supprimé ensuite)
-  rvb_path <- file.path(output_dir, "ortho_rvb.tif")
-  irc_path <- file.path(output_dir, "ortho_irc.tif")
+  # Sauvegarder les mosaïques finales
   writeRaster(rvb, rvb_path, overwrite = TRUE)
-  rvb <- rast(rvb_path)
   writeRaster(irc, irc_path, overwrite = TRUE)
-  irc <- rast(irc_path)
 
-  message(sprintf("\nRVB: %s (%d x %d px)", rvb_path, ncol(rvb), nrow(rvb)))
-  message(sprintf("IRC: %s (%d x %d px)", irc_path, ncol(irc), nrow(irc)))
+  message(sprintf("\nRVB sauvegardé: %s (%d x %d px)",
+                   rvb_path, ncol(rvb), nrow(rvb)))
+  message(sprintf("IRC sauvegardé: %s (%d x %d px)",
+                   irc_path, ncol(irc), nrow(irc)))
 
-  # Nettoyer les fichiers temporaires (tuiles + mosaïques intermédiaires)
+  # Nettoyer les tuiles temporaires
   tile_files <- dir_ls(output_dir, glob = "*_tile_*.tif")
   if (length(tile_files) > 0) file_delete(tile_files)
-  mosaic_files <- dir_ls(output_dir, glob = "*_mosaic.tif")
-  if (length(mosaic_files) > 0) file_delete(mosaic_files)
+
+  # Re-lire depuis les fichiers sauvegardés (terra est file-backed :
+  # après suppression des tuiles, les objets doivent pointer vers
+  # les fichiers finaux ortho_rvb.tif / ortho_irc.tif)
+  rvb <- rast(rvb_path)
+  irc <- rast(irc_path)
 
   return(list(rvb = rvb, irc = irc,
               rvb_path = rvb_path, irc_path = irc_path))
@@ -284,7 +323,6 @@ download_ortho_for_aoi <- function(aoi, output_dir, res_m = RES_IGN) {
 download_wcs_coverage <- function(bbox, coverage_id, res_m = 1, dest_file) {
   xmin <- bbox[1]; ymin <- bbox[2]; xmax <- bbox[3]; ymax <- bbox[4]
 
-  # WCS 2.0.1 GetCoverage
   wcs_url <- paste0(
     IGN_WCS_URL, "?",
     "SERVICE=WCS&VERSION=2.0.1&REQUEST=GetCoverage",
@@ -324,10 +362,7 @@ download_wcs_coverage <- function(bbox, coverage_id, res_m = 1, dest_file) {
   })
 }
 
-#' Télécharger le MNT et le MNS IGN pour une emprise (avec tuilage WCS)
-#'
-#' Le WCS a une limite de taille par requête (~2048x2048 pixels à 1m).
-#' On tuilage les requêtes si nécessaire.
+#' Télécharger une élévation IGN complète pour une emprise (avec tuilage WCS)
 #'
 #' @param bbox Emprise c(xmin, ymin, xmax, ymax)
 #' @param coverage_id Couverture WCS
@@ -338,8 +373,7 @@ download_wcs_coverage <- function(bbox, coverage_id, res_m = 1, dest_file) {
 download_elevation_tiled <- function(bbox, coverage_id, res_m = 1,
                                       output_dir, prefix = "elev") {
   xmin <- bbox[1]; ymin <- bbox[2]; xmax <- bbox[3]; ymax <- bbox[4]
-  wcs_max_px <- 2048
-  tile_size_m <- wcs_max_px * res_m
+  tile_size_m <- WCS_MAX_PX * res_m
 
   x_starts <- seq(xmin, xmax, by = tile_size_m)
   y_starts <- seq(ymin, ymax, by = tile_size_m)
@@ -382,16 +416,6 @@ download_elevation_tiled <- function(bbox, coverage_id, res_m = 1,
     mosaic <- do.call(merge, tile_rasters)
   }
 
-  # Sauvegarder le mosaïque dans un fichier consolidé, puis re-lire
-  # pour décorréler des fichiers tuiles (terra est file-backed)
-  mosaic_file <- file.path(output_dir, paste0(prefix, "_mosaic.tif"))
-  writeRaster(mosaic, mosaic_file, overwrite = TRUE)
-  mosaic <- rast(mosaic_file)
-
-  # Nettoyer les tuiles temporaires (le mosaïque est maintenant autonome)
-  tile_files <- dir_ls(output_dir, glob = paste0("*", prefix, "_tile_*.tif"))
-  if (length(tile_files) > 0) file_delete(tile_files)
-
   return(mosaic)
 }
 
@@ -400,13 +424,26 @@ download_elevation_tiled <- function(bbox, coverage_id, res_m = 1,
 #' Télécharge le MNS (DSM) et le MNT (DTM) depuis le WCS IGN (RGE ALTI 1m)
 #' et les combine en un SpatRaster 2 bandes comme attendu par FLAIR-HUB.
 #'
+#' Gestion du cache : si dem_dsm_dtm.tif existe déjà, il est réutilisé.
+#'
 #' @param aoi sf object en Lambert-93
 #' @param output_dir Répertoire de sortie
-#' @param res_m Résolution du MNT (1 = RGE ALTI 1m, 5 = BD ALTI 5m)
+#' @param res_m Résolution du MNT (1 = RGE ALTI 1m)
 #' @param rgbi SpatRaster de référence pour le rééchantillonnage à 0.2m
 #' @return Liste avec dem (SpatRaster 2 bandes DSM+DTM) et dem_path
 download_dem_for_aoi <- function(aoi, output_dir, res_m = 1, rgbi = NULL) {
   dir_create(output_dir)
+
+  dem_path <- file.path(output_dir, "dem_dsm_dtm.tif")
+
+  # Cache : réutiliser le fichier existant
+  if (file.exists(dem_path)) {
+    message("\n=== DEM déjà téléchargé (cache) ===")
+    dem <- rast(dem_path)
+    message(sprintf("DEM: %s (%d x %d px, %d bandes)",
+                     dem_path, ncol(dem), nrow(dem), nlyr(dem)))
+    return(list(dem = dem, dem_path = dem_path))
+  }
 
   bbox <- as.numeric(st_bbox(st_union(aoi)))
   message(sprintf("\n=== Téléchargement MNT/MNS IGN (RGE ALTI %dm) ===", res_m))
@@ -419,8 +456,8 @@ download_dem_for_aoi <- function(aoi, output_dir, res_m = 1, rgbi = NULL) {
   )
 
   # MNS (DSM - surface avec bâtiments/végétation)
-  # Note : la couverture MNS LiDAR HD est en cours de déploiement.
-  # Elle n'est pas encore disponible partout en France.
+  # La couverture MNS LiDAR HD est en cours de déploiement,
+  # pas encore disponible partout en France.
   message("\n--- MNS (DSM, surface, LiDAR HD) ---")
   message("  Note : le MNS n'est pas disponible partout (LiDAR HD en cours)")
   dsm <- tryCatch(
@@ -442,13 +479,14 @@ download_dem_for_aoi <- function(aoi, output_dir, res_m = 1, rgbi = NULL) {
 
   # Si le MNS n'est pas disponible, utiliser le MNT seul
   # (DSM = DTM → CHM = 0, pas d'info de hauteur mais on garde l'altitude)
-  if (is.null(dsm) && !is.null(dtm)) {
+  has_mns <- !is.null(dsm)
+  if (!has_mns && !is.null(dtm)) {
     message("\nMNS non disponible pour cette zone.")
     message("Utilisation du MNT seul (DSM = DTM, CHM = 0).")
     message("Le modèle bénéficiera quand même de l'altitude du terrain.")
     dsm <- dtm
   }
-  if (is.null(dtm) && !is.null(dsm)) {
+  if (is.null(dtm) && has_mns) {
     message("MNT non disponible, utilisation du MNS seul (DTM = DSM)")
     dtm <- dsm
   }
@@ -458,7 +496,7 @@ download_dem_for_aoi <- function(aoi, output_dir, res_m = 1, rgbi = NULL) {
   }
 
   # Aligner les grilles DSM et DTM
-  if (!compareGeom(dsm, dtm, stopOnError = FALSE)) {
+  if (has_mns && !compareGeom(dsm, dtm, stopOnError = FALSE)) {
     dsm <- resample(dsm, dtm, method = "bilinear")
   }
 
@@ -472,19 +510,12 @@ download_dem_for_aoi <- function(aoi, output_dir, res_m = 1, rgbi = NULL) {
     dem <- resample(dem, rgbi, method = "bilinear")
   }
 
-  # Sauvegarder et re-lire pour décorréler des fichiers mosaïques
-  dem_path <- file.path(output_dir, "dem_dsm_dtm.tif")
+  # Sauvegarder
   writeRaster(dem, dem_path, overwrite = TRUE, gdal = c("COMPRESS=LZW"))
-  dem <- rast(dem_path)
 
-  # Nettoyer les fichiers mosaïques temporaires (mnt_mosaic, mns_mosaic)
-  mosaic_files <- dir_ls(output_dir, glob = "*_mosaic.tif")
-  if (length(mosaic_files) > 0) file_delete(mosaic_files)
-
-  has_chm <- !is.null(dsm) && !identical(dsm, dtm)
-  message(sprintf("\nDEM: %s (%d x %d px, bandes: DSM + DTM)",
+  message(sprintf("\nDEM sauvegardé: %s (%d x %d px, bandes: DSM + DTM)",
                    dem_path, ncol(dem), nrow(dem)))
-  if (has_chm) {
+  if (has_mns) {
     message("  Sources: DSM = MNS LiDAR HD, DTM = RGE ALTI")
   } else {
     message("  Sources: DSM = DTM = RGE ALTI (MNS non disponible)")
@@ -494,12 +525,19 @@ download_dem_for_aoi <- function(aoi, output_dir, res_m = 1, rgbi = NULL) {
   message(sprintf("  Altitude DTM: %.0f - %.0f m",
                    min(values(dem[["DTM"]]), na.rm = TRUE),
                    max(values(dem[["DTM"]]), na.rm = TRUE)))
-  if (has_chm) {
+  if (has_mns) {
     chm <- dem[["DSM"]] - dem[["DTM"]]
     message(sprintf("  Hauteur CHM (DSM-DTM): %.1f - %.1f m",
                      min(values(chm), na.rm = TRUE),
                      max(values(chm), na.rm = TRUE)))
   }
+
+  # Nettoyer les tuiles temporaires
+  tile_files <- dir_ls(output_dir, glob = "*_tile_*.tif")
+  if (length(tile_files) > 0) file_delete(tile_files)
+
+  # Re-lire depuis le fichier sauvegardé
+  dem <- rast(dem_path)
 
   return(list(dem = dem, dem_path = dem_path))
 }
@@ -736,7 +774,7 @@ run_inference <- function(rgbi, model_path) {
 #' @param model_path Chemin local vers un modèle (optionnel)
 #' @param res_m Résolution de téléchargement ortho IGN (0.2m)
 #' @param use_dem Télécharger et utiliser le MNT/MNS IGN (config LC-B, +1pt mIoU)
-#' @param dem_res_m Résolution du MNT (1 = RGE ALTI 1m, 5 = BD ALTI 5m)
+#' @param dem_res_m Résolution du MNT (1 = RGE ALTI 1m)
 #' @return Liste avec tous les résultats
 pipeline_aoi_to_landcover <- function(aoi_path,
                                         output_dir = file.path(getwd(), "outputs"),
@@ -761,7 +799,8 @@ pipeline_aoi_to_landcover <- function(aoi_path,
   aoi <- load_aoi(aoi_path)
 
   # --- Étape 2 : Télécharger les ortho IGN ---
-  message(sprintf("\n>>> ÉTAPE 2/%d : Téléchargement des ortho IGN (RVB + IRC)", n_steps))
+  message(sprintf("\n>>> ÉTAPE 2/%d : Téléchargement des ortho IGN (RVB + IRC)",
+                   n_steps))
   ortho <- download_ortho_for_aoi(aoi, output_dir = output_dir, res_m = res_m)
 
   # Combiner RVB + IRC en RGBI
