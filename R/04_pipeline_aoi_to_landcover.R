@@ -64,10 +64,23 @@ COSIA_LABELS_15 <- c(
   "Labouré", "Vigne", "Feuillu", "Conifère", "Lande"
 )
 
+# Couleurs FLAIR-1 remappées vers l'ordre CoSIA thématique
 COSIA_COLORS_15 <- c(
-  "#db0e9a", "#938e7b", "#f80c00", "#a97101", "#1553ae",
-  "#194a26", "#46e483", "#f3a60d", "#660082", "#55ff00",
-  "#fff30d", "#e4df7c", "#ffffff", "#8ab3a0", "#6b714f"
+  "#db0e9a",  #  1 Bâtiment    (FLAIR-1: building)
+  "#9999ff",  #  2 Serre       (FLAIR-1: greenhouse)
+  "#3de6eb",  #  3 Piscine     (FLAIR-1: swimming pool)
+  "#f80c00",  #  4 Imperméable (FLAIR-1: impervious)
+  "#938e7b",  #  5 Perméable   (FLAIR-1: pervious)
+  "#a97101",  #  6 Sol nu      (FLAIR-1: bare soil)
+  "#1553ae",  #  7 Eau         (FLAIR-1: water)
+  "#ffffff",  #  8 Neige       (FLAIR-1: snow)
+  "#55ff00",  #  9 Herbacé     (FLAIR-1: herbaceous)
+  "#fff30d",  # 10 Agricole    (FLAIR-1: agricultural)
+  "#e4df7c",  # 11 Labouré     (FLAIR-1: plowed)
+  "#660082",  # 12 Vigne       (FLAIR-1: vineyard)
+  "#46e483",  # 13 Feuillu     (FLAIR-1: deciduous)
+  "#194a26",  # 14 Conifère    (FLAIR-1: coniferous)
+  "#f3a60d"   # 15 Lande       (FLAIR-1: brushwood)
 )
 
 # ==============================================================================
@@ -700,30 +713,39 @@ if model_loaded:
     if pad_h > 0 or pad_w > 0:
         pred_flair = pred_flair[:H, :W]
 
-    # Remap FLAIR-1 (0-indexed) → CoSIA (1-indexed)
-    #   FLAIR-1 :  0=building  1=pervious  2=impervious  3=bare_soil  4=water
-    #              5=conifer   6=deciduous 7=brushwood   8=vineyard   9=herbaceous
-    #             10=agricultural 11=plowed 12=pool 13=snow 14=greenhouse
-    #   CoSIA  :  1=Bâtiment 2=Serre 3=Piscine 4=Imperméable 5=Perméable
-    #             6=Sol nu 7=Eau 8=Neige 9=Herbacé 10=Agricole
-    #            11=Labouré 12=Vigne 13=Feuillu 14=Conifère 15=Lande
+    # Remap FLAIR-1 (0-indexed argmax) → CoSIA (1-indexed)
+    #
+    # FLAIR-1 dataset labels (1-indexed in GeoTIFF, shifted to 0-indexed for model):
+    #   0=building  1=pervious  2=impervious  3=bare_soil  4=water
+    #   5=coniferous  6=deciduous  7=brushwood  8=vineyard  9=herbaceous
+    #   10=agricultural  11=plowed  12=swimming_pool  13=snow
+    #   14=clear_cut(DISABLED)  15=mixed(DISABLED)  16=ligneous(DISABLED)
+    #   17=greenhouse(ACTIVE)  18=other(DISABLED)
+    #
+    # CoSIA 15 classes (1-indexed):
+    #   1=Bâtiment 2=Serre 3=Piscine 4=Imperméable 5=Perméable
+    #   6=Sol nu 7=Eau 8=Neige 9=Herbacé 10=Agricole
+    #   11=Labouré 12=Vigne 13=Feuillu 14=Conifère 15=Lande
     remap = np.array([
-        1,   # FLAIR 0  (building)    → CoSIA 1  (Bâtiment)
-        5,   # FLAIR 1  (pervious)    → CoSIA 5  (Perméable)
-        4,   # FLAIR 2  (impervious)  → CoSIA 4  (Imperméable)
-        6,   # FLAIR 3  (bare soil)   → CoSIA 6  (Sol nu)
-        7,   # FLAIR 4  (water)       → CoSIA 7  (Eau)
-        14,  # FLAIR 5  (conifer)     → CoSIA 14 (Conifère)
-        13,  # FLAIR 6  (deciduous)   → CoSIA 13 (Feuillu)
-        15,  # FLAIR 7  (brushwood)   → CoSIA 15 (Lande)
-        12,  # FLAIR 8  (vineyard)    → CoSIA 12 (Vigne)
-        9,   # FLAIR 9  (herbaceous)  → CoSIA 9  (Herbacé)
-        10,  # FLAIR 10 (agricultural)→ CoSIA 10 (Agricole)
-        11,  # FLAIR 11 (plowed)      → CoSIA 11 (Labouré)
-        3,   # FLAIR 12 (pool)        → CoSIA 3  (Piscine)
-        8,   # FLAIR 13 (snow)        → CoSIA 8  (Neige)
-        2,   # FLAIR 14 (greenhouse)  → CoSIA 2  (Serre)
-        0, 0, 0, 0  # classes 15-18 désactivées
+        1,   # FLAIR 0  (building)       → CoSIA 1  (Bâtiment)
+        5,   # FLAIR 1  (pervious)       → CoSIA 5  (Perméable)
+        4,   # FLAIR 2  (impervious)     → CoSIA 4  (Imperméable)
+        6,   # FLAIR 3  (bare soil)      → CoSIA 6  (Sol nu)
+        7,   # FLAIR 4  (water)          → CoSIA 7  (Eau)
+        14,  # FLAIR 5  (coniferous)     → CoSIA 14 (Conifère)
+        13,  # FLAIR 6  (deciduous)      → CoSIA 13 (Feuillu)
+        15,  # FLAIR 7  (brushwood)      → CoSIA 15 (Lande)
+        12,  # FLAIR 8  (vineyard)       → CoSIA 12 (Vigne)
+        9,   # FLAIR 9  (herbaceous)     → CoSIA 9  (Herbacé)
+        10,  # FLAIR 10 (agricultural)   → CoSIA 10 (Agricole)
+        11,  # FLAIR 11 (plowed)         → CoSIA 11 (Labouré)
+        3,   # FLAIR 12 (swimming pool)  → CoSIA 3  (Piscine)
+        8,   # FLAIR 13 (snow)           → CoSIA 8  (Neige)
+        0,   # FLAIR 14 (clear cut)      → 0 (DISABLED)
+        0,   # FLAIR 15 (mixed)          → 0 (DISABLED)
+        0,   # FLAIR 16 (ligneous)       → 0 (DISABLED)
+        2,   # FLAIR 17 (greenhouse)     → CoSIA 2  (Serre)
+        0,   # FLAIR 18 (other)          → 0 (DISABLED)
     ], dtype=np.int32)
 
     pred = remap[pred_flair]
