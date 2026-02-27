@@ -139,7 +139,7 @@ load_aoi <- function(gpkg_path, layer = NULL) {
 #'   pour couches d'élévation)
 #' @return SpatRaster ou NULL si échec
 download_wms_tile <- function(bbox, layer, res_m = RES_IGN, dest_file,
-                               styles = "") {
+                               styles = "", max_retries = 3) {
   xmin <- bbox[1]; ymin <- bbox[2]; xmax <- bbox[3]; ymax <- bbox[4]
 
   width  <- round((xmax - xmin) / res_m)
@@ -160,29 +160,50 @@ download_wms_tile <- function(bbox, layer, res_m = RES_IGN, dest_file,
 
   message("  WMS URL: ", wms_url)
 
-  tryCatch({
-    tmp_file <- tempfile(fileext = ".tif")
-    curl_download(url = wms_url, destfile = tmp_file, quiet = TRUE)
+  # Handle curl avec HTTP/1.1 forcé (évite les erreurs HTTP/2 du serveur IGN)
+  h <- curl::new_handle()
+  curl::handle_setopt(h, http_version = 2L)  # CURL_HTTP_VERSION_1_1
 
-    r <- rast(tmp_file)
+  tmp_file <- tempfile(fileext = ".tif")
 
-    # Assigner le CRS et l'emprise si nécessaire
-    if (is.na(crs(r)) || crs(r) == "") {
-      crs(r) <- "EPSG:2154"
+  for (attempt in seq_len(max_retries)) {
+    result <- tryCatch({
+      curl::curl_download(url = wms_url, destfile = tmp_file,
+                          quiet = TRUE, handle = h)
+
+      r <- rast(tmp_file)
+
+      # Assigner le CRS et l'emprise si nécessaire
+      if (is.na(crs(r)) || crs(r) == "") {
+        crs(r) <- "EPSG:2154"
+      }
+      ext(r) <- ext(xmin, xmax, ymin, ymax)
+
+      # Écrire le fichier final et re-lire
+      writeRaster(r, dest_file, overwrite = TRUE)
+      r <- rast(dest_file)
+      unlink(tmp_file)
+
+      return(r)
+    }, error = function(e) {
+      e
+    })
+
+    # Si succès (SpatRaster retourné), on sort
+    if (!inherits(result, "error")) return(result)
+
+    # Sinon retry avec backoff exponentiel
+    if (attempt < max_retries) {
+      wait_s <- 2^attempt
+      message(sprintf("  Retry %d/%d dans %ds (%s)",
+                       attempt, max_retries, wait_s, result$message))
+      Sys.sleep(wait_s)
+    } else {
+      unlink(tmp_file)
+      warning("Échec WMS après ", max_retries, " tentatives: ", result$message)
+      return(NULL)
     }
-    ext(r) <- ext(xmin, xmax, ymin, ymax)
-
-    # Écrire le fichier final et re-lire
-    writeRaster(r, dest_file, overwrite = TRUE)
-    r <- rast(dest_file)
-    unlink(tmp_file)
-
-    return(r)
-  }, error = function(e) {
-    unlink(tmp_file)
-    warning("Échec WMS: ", e$message)
-    return(NULL)
-  })
+  }
 }
 
 #' Télécharger une couche WMS IGN complète pour une emprise (tuilage automatique)
