@@ -37,6 +37,7 @@ export(download_pretrained_model)
 export(predict_landcover_from_aerial)
 export(predict_crop_from_sentinel)
 export(pipeline_aoi_to_landcover)
+export(plot_results)
 
 import(terra)
 import(sf)

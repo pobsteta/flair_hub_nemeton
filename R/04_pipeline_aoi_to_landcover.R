@@ -1022,7 +1022,162 @@ pipeline_aoi_to_landcover <- function(aoi_path,
   )
   if (!is.null(dem_data)) result$dem <- dem_data$dem
 
+  # --- Affichage interactif RStudio (patchwork) ---
+  tryCatch({
+    p <- plot_results(result)
+    if (!is.null(p)) print(p)
+  }, error = function(e) {
+    message("Affichage patchwork ignoré (packages manquants ?): ", e$message)
+  })
+
   return(result)
+}
+
+# ==============================================================================
+# Visualisation interactive (ggplot2 + tidyterra + patchwork)
+# ==============================================================================
+
+#' Afficher les résultats du pipeline dans RStudio
+#'
+#' Crée un assemblage patchwork identique au PDF exporté.
+#' Nécessite ggplot2, tidyterra et patchwork.
+#'
+#' @param result Liste retournée par \code{pipeline_aoi_to_landcover()}
+#' @return Un objet patchwork (affiché automatiquement dans RStudio)
+#' @export
+plot_results <- function(result) {
+
+  # --- Vérification des packages ---
+  pkgs <- c("ggplot2", "tidyterra", "patchwork")
+  missing <- pkgs[!vapply(pkgs, requireNamespace, logical(1), quietly = TRUE)]
+  if (length(missing) > 0) {
+    message("Packages manquants pour l'affichage RStudio: ",
+            paste(missing, collapse = ", "))
+    message('  install.packages(c("ggplot2", "tidyterra", "patchwork"))')
+    return(invisible(NULL))
+  }
+
+  library(ggplot2)
+  library(tidyterra)
+  library(patchwork)
+
+  # Palette NDVI
+  col_ndvi <- c("#d73027", "#fc8d59", "#fee08b", "#ffffbf",
+                "#d9ef8b", "#91cf60", "#1a9850", "#006837")
+
+  # --- Panel 1 : Ortho RVB ---
+  p_rvb <- ggplot() +
+    geom_spatraster_rgb(data = result$ortho_rvb, r = 1, g = 2, b = 3,
+                        max_col_value = 255) +
+    ggtitle("Ortho RVB IGN (0.20m)") +
+    theme_void() +
+    theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 11))
+
+  # --- Panel 2 : IRC fausses couleurs ---
+  p_irc <- ggplot() +
+    geom_spatraster_rgb(data = result$ortho_irc, r = 1, g = 2, b = 3,
+                        max_col_value = 255) +
+    ggtitle("Ortho IRC fausses couleurs (0.20m)") +
+    theme_void() +
+    theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 11))
+
+  # --- Panel 3 : NDVI ---
+  p_ndvi <- ggplot() +
+    geom_spatraster(data = result$ndvi) +
+    scale_fill_gradientn(colours = col_ndvi, na.value = "transparent",
+                         limits = c(-0.2, 1), name = "NDVI") +
+    ggtitle("NDVI (depuis IRC)") +
+    theme_void() +
+    theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 11),
+          legend.position = "right")
+
+  # --- Panel 4 (optionnel) : MNT ---
+  p_dtm <- NULL
+  p_chm <- NULL
+  if (!is.null(result$dem)) {
+    col_elev <- c("#313695", "#4575b4", "#74add1", "#abd9e9", "#fee090",
+                  "#fdae61", "#f46d43", "#d73027", "#a50026")
+
+    dtm <- result$dem[["DTM"]]
+    p_dtm <- ggplot() +
+      geom_spatraster(data = dtm) +
+      scale_fill_gradientn(colours = col_elev, na.value = "transparent",
+                           name = "Altitude (m)") +
+      ggtitle("MNT IGN (RGE ALTI)") +
+      theme_void() +
+      theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 11),
+            legend.position = "right")
+
+    chm <- result$dem[["DSM"]] - result$dem[["DTM"]]
+    col_chm <- c("#ffffcc", "#d9f0a3", "#addd8e", "#78c679",
+                 "#41ab5d", "#238443", "#005a32")
+    p_chm <- ggplot() +
+      geom_spatraster(data = chm) +
+      scale_fill_gradientn(colours = col_chm, na.value = "transparent",
+                           name = "Hauteur (m)") +
+      ggtitle("CHM (DSM - DTM)") +
+      theme_void() +
+      theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 11),
+            legend.position = "right")
+  }
+
+  # --- Panel Occupation du sol ---
+  lc <- result$landcover
+
+  # Identifier les classes présentes
+  lc_vals <- unique(na.omit(as.integer(values(lc))))
+  lc_vals <- sort(lc_vals[lc_vals >= 1 & lc_vals <= 15])
+
+  cls_labels <- COSIA_LABELS_15[lc_vals]
+  cls_colors <- COSIA_COLORS_15[lc_vals]
+  names(cls_colors) <- cls_labels
+
+  # Reclasser en facteur
+  lc_factor <- as.factor(lc)
+  levels(lc_factor) <- data.frame(
+    id    = 1:15,
+    label = COSIA_LABELS_15
+  )
+
+  p_lc <- ggplot() +
+    geom_spatraster(data = lc_factor) +
+    scale_fill_manual(values = setNames(COSIA_COLORS_15, COSIA_LABELS_15),
+                      na.value = "transparent", name = "Classe",
+                      drop = TRUE) +
+    ggtitle("Occupation du sol FLAIR-HUB") +
+    theme_void() +
+    theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 11),
+          legend.position = "right",
+          legend.text = element_text(size = 7))
+
+  # --- Assemblage patchwork ---
+  if (!is.null(p_dtm)) {
+    # Layout 2x3 (avec DEM)
+    combined <- (p_rvb | p_irc | p_ndvi) /
+                (p_dtm | p_chm | p_lc) +
+      plot_annotation(
+        title    = "FLAIR-HUB : Résultats du pipeline",
+        subtitle = "Occupation du sol par segmentation sémantique (IGN)",
+        theme    = theme(
+          plot.title    = element_text(hjust = 0.5, face = "bold", size = 14),
+          plot.subtitle = element_text(hjust = 0.5, size = 10, colour = "grey40")
+        )
+      )
+  } else {
+    # Layout 2x2 (sans DEM)
+    combined <- (p_rvb | p_irc) /
+                (p_ndvi | p_lc) +
+      plot_annotation(
+        title    = "FLAIR-HUB : Résultats du pipeline",
+        subtitle = "Occupation du sol par segmentation sémantique (IGN)",
+        theme    = theme(
+          plot.title    = element_text(hjust = 0.5, face = "bold", size = 14),
+          plot.subtitle = element_text(hjust = 0.5, size = 10, colour = "grey40")
+        )
+      )
+  }
+
+  return(combined)
 }
 
 # ==============================================================================

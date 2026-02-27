@@ -27,7 +27,10 @@ Imports:
 Suggests:
     testthat (>= 3.0.0),
     knitr,
-    rmarkdown
+    rmarkdown,
+    ggplot2,
+    tidyterra,
+    patchwork
 VignetteBuilder: knitr
 URL: https://github.com/pobsteta/flair_hub_nemeton
 BugReports: https://github.com/pobsteta/flair_hub_nemeton/issues
