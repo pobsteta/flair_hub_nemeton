@@ -291,6 +291,27 @@ download_ign_tiled <- function(bbox, layer, res_m = RES_IGN,
   return(mosaic)
 }
 
+#' Vérifier qu'un raster WMS contient des données réelles
+#'
+#' Certaines couches millésimées ne couvrent pas toutes les zones.
+#' Le WMS retourne alors un raster valide mais vide (pixels à 0 ou NA).
+#' Cette fonction détecte ce cas pour déclencher un fallback.
+#'
+#' @param r SpatRaster à valider
+#' @param min_pct Pourcentage minimum de pixels non-vides requis (défaut: 5%)
+#' @return TRUE si le raster contient suffisamment de données
+validate_wms_data <- function(r, min_pct = 5) {
+  if (is.null(r)) return(FALSE)
+  vals <- values(r[[1]])
+  n_valid <- sum(!is.na(vals) & vals > 0)
+  pct <- n_valid / length(vals) * 100
+  if (pct < min_pct) {
+    message(sprintf("  Données insuffisantes : %.1f%% de pixels valides (%d/%d)",
+                    pct, n_valid, length(vals)))
+  }
+  return(pct >= min_pct)
+}
+
 #' Télécharger les ortho RVB et IRC pour une AOI
 #'
 #' Gestion du cache : si ortho_rvb.tif et ortho_irc.tif existent déjà,
@@ -299,7 +320,8 @@ download_ign_tiled <- function(bbox, layer, res_m = RES_IGN,
 #' Gestion des millésimes (indépendants pour IRC et ortho) :
 #'   - millesime_ortho : NULL = mosaïque nationale, entier = année spécifique
 #'   - millesime_irc : NULL = mosaïque la plus récente, entier = année spécifique
-#'   Si le millésime demandé n'est pas disponible, fallback sur la couche courante.
+#'   Si le millésime demandé n'est pas disponible (erreur WMS ou données vides),
+#'   fallback automatique sur la mosaïque courante.
 #'
 #' @param aoi sf object (AOI en Lambert-93)
 #' @param output_dir Répertoire de sortie
@@ -351,40 +373,58 @@ download_ortho_for_aoi <- function(aoi, output_dir, res_m = RES_IGN,
   message(sprintf("Millésime RVB: %s (couche: %s)", label_ortho, layer_ortho))
   message(sprintf("Millésime IRC: %s (couche: %s)", label_irc, layer_irc))
 
-  # --- RVB (avec fallback si millésime indisponible) ---
+  # --- RVB (avec fallback si millésime indisponible ou données vides) ---
   message("\n--- Ortho RVB ---")
   rvb <- tryCatch(
     download_ign_tiled(bbox, layer = layer_ortho, res_m = res_m,
                        output_dir = output_dir, prefix = "rvb"),
     error = function(e) {
-      if (!is.null(millesime_ortho)) {
-        message(sprintf("  Couche %s indisponible, fallback sur %s",
-                        layer_ortho, IGN_LAYER_ORTHO))
-        layer_ortho <<- IGN_LAYER_ORTHO
-        label_ortho <<- "plus récent (fallback)"
-        download_ign_tiled(bbox, layer = IGN_LAYER_ORTHO, res_m = res_m,
-                           output_dir = output_dir, prefix = "rvb")
-      } else stop(e)
+      message("  Erreur téléchargement RVB: ", e$message)
+      NULL
     }
   )
+
+  # Fallback : si erreur ou données vides (millésime non couvert pour cette zone)
+  if (!is.null(millesime_ortho) &&
+      (is.null(rvb) || !validate_wms_data(rvb))) {
+    message(sprintf("  Millésime %s indisponible pour cette zone, fallback sur %s",
+                    millesime_ortho, IGN_LAYER_ORTHO))
+    layer_ortho <- IGN_LAYER_ORTHO
+    label_ortho <- "plus récent (fallback)"
+    # Nettoyer les tuiles du premier essai
+    tile_files <- dir_ls(output_dir, glob = "rvb_tile_*.tif")
+    if (length(tile_files) > 0) file_delete(tile_files)
+    rvb <- download_ign_tiled(bbox, layer = IGN_LAYER_ORTHO, res_m = res_m,
+                               output_dir = output_dir, prefix = "rvb")
+  }
+  if (is.null(rvb)) stop("Impossible de télécharger l'ortho RVB")
   names(rvb)[1:min(3, nlyr(rvb))] <- c("Rouge", "Vert", "Bleu")[1:min(3, nlyr(rvb))]
 
-  # --- IRC (avec fallback si millésime indisponible) ---
+  # --- IRC (avec fallback si millésime indisponible ou données vides) ---
   message("\n--- Ortho IRC ---")
   irc <- tryCatch(
     download_ign_tiled(bbox, layer = layer_irc, res_m = res_m,
                        output_dir = output_dir, prefix = "irc"),
     error = function(e) {
-      if (!is.null(millesime_irc)) {
-        message(sprintf("  Couche %s indisponible, fallback sur %s",
-                        layer_irc, IGN_LAYER_IRC))
-        layer_irc <<- IGN_LAYER_IRC
-        label_irc <<- "plus récent (fallback)"
-        download_ign_tiled(bbox, layer = IGN_LAYER_IRC, res_m = res_m,
-                           output_dir = output_dir, prefix = "irc")
-      } else stop(e)
+      message("  Erreur téléchargement IRC: ", e$message)
+      NULL
     }
   )
+
+  # Fallback : si erreur ou données vides (millésime non couvert pour cette zone)
+  if (!is.null(millesime_irc) &&
+      (is.null(irc) || !validate_wms_data(irc))) {
+    message(sprintf("  Millésime %s indisponible pour cette zone, fallback sur %s",
+                    millesime_irc, IGN_LAYER_IRC))
+    layer_irc <- IGN_LAYER_IRC
+    label_irc <- "plus récent (fallback)"
+    # Nettoyer les tuiles du premier essai
+    tile_files <- dir_ls(output_dir, glob = "irc_tile_*.tif")
+    if (length(tile_files) > 0) file_delete(tile_files)
+    irc <- download_ign_tiled(bbox, layer = IGN_LAYER_IRC, res_m = res_m,
+                               output_dir = output_dir, prefix = "irc")
+  }
+  if (is.null(irc)) stop("Impossible de télécharger l'ortho IRC")
   names(irc)[1:min(3, nlyr(irc))] <- c("PIR", "Rouge", "Vert")[1:min(3, nlyr(irc))]
 
   # Découper aux limites exactes de l'AOI
