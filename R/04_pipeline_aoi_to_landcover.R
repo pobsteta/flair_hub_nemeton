@@ -725,7 +725,10 @@ make_inference_patches <- function(r, patch_size = PATCH_SIZE, overlap = 32) {
   return(patches)
 }
 
-#' Inférence sur un patch
+#' Inférence sur un patch avec le modèle FLAIR-INC (smp.Unet + ResNet34)
+#'
+#' Charge le modèle, normalise l'image, exécute l'inférence PyTorch,
+#' et remappe les classes FLAIR-1 vers la nomenclature CoSIA.
 predict_patch <- function(patch, model_path, n_classes = 15) {
   library(reticulate)
 
@@ -742,49 +745,177 @@ import os
 import torch
 import numpy as np
 import rasterio
+import segmentation_models_pytorch as smp
 
+# ======================================================================
+# 1. Charger l image
+# ======================================================================
 with rasterio.open("%s") as src:
-    image = src.read().astype(np.float32)
+    image = src.read().astype(np.float32)  # (C, H, W)
     profile = src.profile.copy()
 
 num_bands, H, W = image.shape
 print(f"Patch: {num_bands} bandes, {H}x{W} px")
 
-# Chercher le fichier de poids
+# ======================================================================
+# 2. Chercher le fichier de poids
+# ======================================================================
 model_dir = "%s"
-ckpt_path = model_dir
+ckpt_path = None
 if os.path.isdir(model_dir):
-    for f in os.listdir(model_dir):
+    for f in sorted(os.listdir(model_dir)):
         if f.endswith((".ckpt", ".pth", ".pt", ".bin")):
             ckpt_path = os.path.join(model_dir, f)
             break
+elif os.path.isfile(model_dir):
+    ckpt_path = model_dir
 
-# Classification spectrale (fallback)
-if num_bands >= 4:
-    r, g, b, nir = image[0], image[1], image[2], image[3]
-    ndvi = (nir - r) / (nir + r + 1e-6)
-    brightness = (r + g + b) / 3
+model_loaded = False
 
-    pred = np.zeros((H, W), dtype=np.int32)
+if ckpt_path is not None:
+    print(f"Fichier modèle: {os.path.basename(ckpt_path)}")
 
-    pred[(brightness < 30) & (ndvi < 0.1)] = 7   # Eau
-    pred[(brightness > 150) & (ndvi < 0.1)] = 1   # Bâtiment
-    pred[(brightness > 100) & (ndvi < 0.15) & (pred == 0)] = 4  # Imperméable
-    pred[(ndvi < 0.2) & (pred == 0)] = 6          # Sol nu
-    pred[(ndvi >= 0.2) & (ndvi < 0.35) & (pred == 0)] = 9   # Herbacé
-    pred[(ndvi >= 0.35) & (ndvi < 0.5) & (pred == 0)] = 10  # Agricole
-    pred[(ndvi >= 0.5) & (ndvi < 0.7) & (pred == 0)] = 13   # Feuillu
-    pred[(ndvi >= 0.7) & (pred == 0)] = 14        # Conifère
+    # ==================================================================
+    # 3. Instancier le modèle smp.Unet(ResNet34)
+    #    Le FLAIR-INC 15cl produit 19 logits (4 classes désactivées)
+    # ==================================================================
+    in_ch = min(num_bands, 4)
+    n_out = 19  # FLAIR-INC architecture : 19 sorties (15 actives)
+
+    model = smp.Unet(
+        encoder_name="resnet34",
+        encoder_weights=None,
+        in_channels=in_ch,
+        classes=n_out,
+    )
+
+    # ==================================================================
+    # 4. Charger les poids depuis le checkpoint
+    # ==================================================================
+    try:
+        checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+
+        # Extraire le state_dict (format Lightning ou plain)
+        if isinstance(checkpoint, dict):
+            if "state_dict" in checkpoint:
+                state_dict = checkpoint["state_dict"]
+            elif "model_state_dict" in checkpoint:
+                state_dict = checkpoint["model_state_dict"]
+            else:
+                state_dict = checkpoint
+        else:
+            state_dict = checkpoint.state_dict() if hasattr(checkpoint, "state_dict") else {}
+
+        # Nettoyer les clés (retirer préfixes "model." de Lightning)
+        cleaned = {}
+        for k, v in state_dict.items():
+            new_k = k
+            for prefix in ["model.", "net.", "module.", "backbone."]:
+                if new_k.startswith(prefix):
+                    new_k = new_k[len(prefix):]
+            cleaned[new_k] = v
+
+        missing, unexpected = model.load_state_dict(cleaned, strict=False)
+        if missing:
+            print(f"  Clés manquantes: {len(missing)}")
+        if unexpected:
+            print(f"  Clés inattendues: {len(unexpected)}")
+
+        model.eval()
+        model_loaded = True
+        print("Modèle chargé avec succès (smp.Unet ResNet34)")
+
+    except Exception as e:
+        print(f"Erreur chargement modèle: {e}")
+        model_loaded = False
+
+# ======================================================================
+# 5. Inférence ou fallback
+# ======================================================================
+if model_loaded:
+    # Normalisation FLAIR (centre-réduit, statistiques TRAIN+VAL)
+    #   Bandes : R, G, B, NIR
+    norm_means = np.array([105.08, 110.87, 101.82, 106.38], dtype=np.float32)
+    norm_stds  = np.array([52.17, 45.38, 44.0, 39.69], dtype=np.float32)
+
+    img = image[:4]  # Garder seulement RGBI
+    for c in range(img.shape[0]):
+        img[c] = (img[c] - norm_means[c]) / norm_stds[c]
+
+    # Padding si le patch est plus petit que 512x512
+    pad_h = max(0, 512 - H)
+    pad_w = max(0, 512 - W)
+    if pad_h > 0 or pad_w > 0:
+        img = np.pad(img, ((0, 0), (0, pad_h), (0, pad_w)), mode="reflect")
+
+    tensor = torch.from_numpy(img).unsqueeze(0)  # (1, 4, H, W)
+
+    with torch.no_grad():
+        logits = model(tensor)  # (1, 19, H, W)
+
+    pred_flair = logits.squeeze(0).cpu().numpy().argmax(axis=0)  # (H, W), 0-indexed
+
+    # Retirer le padding
+    if pad_h > 0 or pad_w > 0:
+        pred_flair = pred_flair[:H, :W]
+
+    # Remap FLAIR-1 (0-indexed) → CoSIA (1-indexed)
+    #   FLAIR-1 :  0=building  1=pervious  2=impervious  3=bare_soil  4=water
+    #              5=conifer   6=deciduous 7=brushwood   8=vineyard   9=herbaceous
+    #             10=agricultural 11=plowed 12=pool 13=snow 14=greenhouse
+    #   CoSIA  :  1=Bâtiment 2=Serre 3=Piscine 4=Imperméable 5=Perméable
+    #             6=Sol nu 7=Eau 8=Neige 9=Herbacé 10=Agricole
+    #            11=Labouré 12=Vigne 13=Feuillu 14=Conifère 15=Lande
+    remap = np.array([
+        1,   # FLAIR 0  (building)    → CoSIA 1  (Bâtiment)
+        5,   # FLAIR 1  (pervious)    → CoSIA 5  (Perméable)
+        4,   # FLAIR 2  (impervious)  → CoSIA 4  (Imperméable)
+        6,   # FLAIR 3  (bare soil)   → CoSIA 6  (Sol nu)
+        7,   # FLAIR 4  (water)       → CoSIA 7  (Eau)
+        14,  # FLAIR 5  (conifer)     → CoSIA 14 (Conifère)
+        13,  # FLAIR 6  (deciduous)   → CoSIA 13 (Feuillu)
+        15,  # FLAIR 7  (brushwood)   → CoSIA 15 (Lande)
+        12,  # FLAIR 8  (vineyard)    → CoSIA 12 (Vigne)
+        9,   # FLAIR 9  (herbaceous)  → CoSIA 9  (Herbacé)
+        10,  # FLAIR 10 (agricultural)→ CoSIA 10 (Agricole)
+        11,  # FLAIR 11 (plowed)      → CoSIA 11 (Labouré)
+        3,   # FLAIR 12 (pool)        → CoSIA 3  (Piscine)
+        8,   # FLAIR 13 (snow)        → CoSIA 8  (Neige)
+        2,   # FLAIR 14 (greenhouse)  → CoSIA 2  (Serre)
+        0, 0, 0, 0  # classes 15-18 désactivées
+    ], dtype=np.int32)
+
+    pred = remap[pred_flair]
+
+    n_unique = len(np.unique(pred[pred > 0]))
+    print(f"Inférence NN: {n_unique} classes prédites")
+
 else:
-    pred = np.zeros((H, W), dtype=np.int32)
+    # Fallback : classification spectrale simplifiée
+    print("FALLBACK: modèle non chargé, classification spectrale")
+    if num_bands >= 4:
+        r, g, b, nir = image[0], image[1], image[2], image[3]
+        ndvi = (nir - r) / (nir + r + 1e-6)
+        brightness = (r + g + b) / 3.0
 
-pred = pred + 1
+        pred = np.zeros((H, W), dtype=np.int32)
+        pred[(brightness < 30) & (ndvi < 0.1)] = 7
+        pred[(brightness > 150) & (ndvi < 0.1)] = 1
+        pred[(brightness > 100) & (ndvi < 0.15) & (pred == 0)] = 4
+        pred[(ndvi < 0.2) & (pred == 0)] = 6
+        pred[(ndvi >= 0.2) & (ndvi < 0.35) & (pred == 0)] = 9
+        pred[(ndvi >= 0.35) & (ndvi < 0.5) & (pred == 0)] = 10
+        pred[(ndvi >= 0.5) & (ndvi < 0.7) & (pred == 0)] = 13
+        pred[(ndvi >= 0.7) & (pred == 0)] = 14
+        pred[pred == 0] = 15  # non classé → Lande
+    else:
+        pred = np.full((H, W), 15, dtype=np.int32)
 
 profile.update(count=1, dtype="int32", compress="lzw")
 with rasterio.open("%s", "w", **profile) as dst:
     dst.write(pred.astype(np.int32), 1)
 
-print(f"Prédit: {np.unique(pred).shape[0]} classes")
+print(f"Prédit: {np.unique(pred).shape[0]} classes uniques")
 ', tmp_in_py, model_path_py, tmp_out_py)
 
   tryCatch({
