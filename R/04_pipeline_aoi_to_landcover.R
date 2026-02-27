@@ -503,6 +503,7 @@ download_dem_for_aoi <- function(aoi, output_dir, res_m = 1, rgbi = NULL) {
   if (file.exists(dem_path)) {
     message("\n=== DEM déjà téléchargé (cache) ===")
     dem <- rast(dem_path)
+    names(dem) <- c("DSM", "DTM")[1:nlyr(dem)]
     message(sprintf("DEM: %s (%d x %d px, %d bandes)",
                      dem_path, ncol(dem), nrow(dem), nlyr(dem)))
     return(list(dem = dem, dem_path = dem_path))
@@ -922,9 +923,9 @@ pipeline_aoi_to_landcover <- function(aoi_path,
   writeRaster(landcover, lc_path, overwrite = TRUE, gdal = c("COMPRESS=LZW"))
   message("Occupation du sol: ", lc_path)
 
-  # NDVI
-  pir   <- ortho$irc[["PIR"]]
-  rouge <- ortho$irc[["Rouge"]]
+  # NDVI (IRC bandes: 1=PIR, 2=Rouge, 3=Vert)
+  pir   <- ortho$irc[[1]]
+  rouge <- ortho$irc[[2]]
   ndvi  <- (pir - rouge) / (pir + rouge)
   names(ndvi) <- "NDVI"
   ndvi_path <- file.path(output_dir, "ndvi.tif")
