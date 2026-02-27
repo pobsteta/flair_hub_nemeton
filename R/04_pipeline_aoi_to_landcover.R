@@ -741,7 +741,9 @@ predict_patch <- function(patch, model_path, n_classes = 15) {
   tmp_out_py <- gsub("\\\\", "/", tmp_out)
   model_path_py <- gsub("\\\\", "/", model_path)
 
-  py_code <- sprintf('
+  # NOTE: utiliser gsub au lieu de sprintf pour éviter la limite de 8192
+  # octets de sprintf sur les longues chaînes de format
+  py_code <- '
 import os
 import torch
 import numpy as np
@@ -751,7 +753,7 @@ import segmentation_models_pytorch as smp
 # ======================================================================
 # 1. Charger l image
 # ======================================================================
-with rasterio.open("%s") as src:
+with rasterio.open("__INPUT_PATH__") as src:
     image = src.read().astype(np.float32)  # (C, H, W)
     profile = src.profile.copy()
 
@@ -761,7 +763,7 @@ print(f"Patch: {num_bands} bandes, {H}x{W} px")
 # ======================================================================
 # 2. Chercher le fichier de poids
 # ======================================================================
-model_dir = "%s"
+model_dir = "__MODEL_PATH__"
 ckpt_path = None
 if os.path.isdir(model_dir):
     for f in sorted(os.listdir(model_dir)):
@@ -969,11 +971,14 @@ out_profile = {
     "transform": profile.get("transform"),
     "compress": "lzw",
 }
-with rasterio.open("%s", "w", **out_profile) as dst:
+with rasterio.open("__OUTPUT_PATH__", "w", **out_profile) as dst:
     dst.write(pred.astype(np.int32), 1)
 
 print(f"Prédit: {np.unique(pred).shape[0]} classes uniques")
-', tmp_in_py, model_path_py, tmp_out_py)
+'
+  py_code <- gsub("__INPUT_PATH__", tmp_in_py, py_code, fixed = TRUE)
+  py_code <- gsub("__MODEL_PATH__", model_path_py, py_code, fixed = TRUE)
+  py_code <- gsub("__OUTPUT_PATH__", tmp_out_py, py_code, fixed = TRUE)
 
   tryCatch({
     py_run_string(py_code)
