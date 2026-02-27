@@ -807,14 +807,43 @@ if ckpt_path is not None:
         else:
             state_dict = checkpoint.state_dict() if hasattr(checkpoint, "state_dict") else {}
 
-        # Nettoyer les clés (retirer préfixes "model." de Lightning)
+        # Auto-détection du préfixe des clés du checkpoint
+        # Le checkpoint peut utiliser divers préfixes selon le framework
+        # (Lightning, DataParallel, custom wrapper, etc.)
+        model_keys = set(model.state_dict().keys())
+        ckpt_keys = list(state_dict.keys())
+
+        # Détecter les préfixes candidats depuis les clés du checkpoint
+        candidate_prefixes = ["", "model.", "net.", "module.", "backbone.",
+                              "model.model.", "network.", "seg_model."]
+
+        # Extraire aussi les préfixes réels trouvés dans le checkpoint
+        for k in ckpt_keys[:20]:
+            parts = k.split(".")
+            for i in range(1, min(4, len(parts))):
+                p = ".".join(parts[:i]) + "."
+                if p not in candidate_prefixes:
+                    candidate_prefixes.append(p)
+
+        best_prefix = ""
+        best_match = 0
+        for try_prefix in candidate_prefixes:
+            matches = sum(1 for k in ckpt_keys
+                          if k.startswith(try_prefix) and
+                          k[len(try_prefix):] in model_keys)
+            if matches > best_match:
+                best_match = matches
+                best_prefix = try_prefix
+
+        print(f"  Préfixe détecté: \'{best_prefix}\' ({best_match}/{len(model_keys)} clés correspondent)")
+
+        # Nettoyer les clés avec le meilleur préfixe
         cleaned = {}
         for k, v in state_dict.items():
-            new_k = k
-            for prefix in ["model.", "net.", "module.", "backbone."]:
-                if new_k.startswith(prefix):
-                    new_k = new_k[len(prefix):]
-            cleaned[new_k] = v
+            if best_prefix and k.startswith(best_prefix):
+                cleaned[k[len(best_prefix):]] = v
+            elif not best_prefix:
+                cleaned[k] = v
 
         missing, unexpected = model.load_state_dict(cleaned, strict=False)
         if missing:
@@ -822,9 +851,16 @@ if ckpt_path is not None:
         if unexpected:
             print(f"  Clés inattendues: {len(unexpected)}")
 
-        model.eval()
-        model_loaded = True
-        print("Modèle chargé avec succès (smp.Unet ResNet34)")
+        # Vérifier que suffisamment de poids ont été chargés
+        n_total = len(model_keys)
+        n_missing = len(missing) if missing else 0
+        if n_missing > n_total * 0.5:
+            print(f"  ERREUR: trop de clés manquantes ({n_missing}/{n_total}), modèle non utilisable")
+            model_loaded = False
+        else:
+            model.eval()
+            model_loaded = True
+            print("Modèle chargé avec succès (smp.Unet ResNet34)")
 
     except Exception as e:
         print(f"Erreur chargement modèle: {e}")
@@ -921,8 +957,19 @@ else:
     else:
         pred = np.full((H, W), 15, dtype=np.int32)
 
-profile.update(count=1, dtype="int32", compress="lzw")
-with rasterio.open("%s", "w", **profile) as dst:
+# Construire un profil propre (ne pas hériter les paramètres du fichier source
+# qui sont incompatibles avec une sortie 1 bande int32)
+out_profile = {
+    "driver": "GTiff",
+    "dtype": "int32",
+    "width": W,
+    "height": H,
+    "count": 1,
+    "crs": profile.get("crs"),
+    "transform": profile.get("transform"),
+    "compress": "lzw",
+}
+with rasterio.open("%s", "w", **out_profile) as dst:
     dst.write(pred.astype(np.int32), 1)
 
 print(f"Prédit: {np.unique(pred).shape[0]} classes uniques")
