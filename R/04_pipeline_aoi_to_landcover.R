@@ -730,7 +730,7 @@ make_inference_patches <- function(r, patch_size = PATCH_SIZE, overlap = 32) {
 #'
 #' Charge le modèle, normalise l'image, exécute l'inférence PyTorch,
 #' et remappe les classes FLAIR-1 vers la nomenclature CoSIA.
-predict_patch <- function(patch, model_path, n_classes = 15) {
+predict_patch <- function(patch, model_path, n_classes = 15, ...) {
   library(reticulate)
 
   tmp_in <- tempfile(fileext = ".tif")
@@ -1196,16 +1196,20 @@ pipeline_aoi_to_landcover <- function(aoi_path,
          col = col_chm, plg = list(title = "Hauteur (m)"))
   }
 
-  # Occupation du sol — raster catégoriel (valeur → couleur correcte)
-  # Inclure la classe 0 (Non classifié) si elle existe dans les données
+  # Occupation du sol — raster catégoriel (uniquement les classes présentes)
   lc_plot <- landcover
-  lc_ids <- c(0, 1:15)
-  lc_labels <- c("Non classifié", COSIA_LABELS_15)
-  lc_colors <- c("#808080", COSIA_COLORS_15)
+  lc_present <- sort(unique(na.omit(as.integer(values(landcover)))))
+  lc_ids <- lc_present
+  lc_labels <- vapply(lc_present, function(cls) {
+    if (cls == 0) "Non classifié" else COSIA_LABELS_15[cls]
+  }, character(1))
+  lc_colors <- vapply(lc_present, function(cls) {
+    if (cls == 0) "#808080" else COSIA_COLORS_15[cls]
+  }, character(1))
   levels(lc_plot) <- data.frame(id = lc_ids, label = lc_labels)
   plot(lc_plot, main = paste("Occupation du sol -", config_label),
        col = lc_colors, type = "classes",
-       plg = list(legend = lc_labels, cex = 0.6))
+       plg = list(legend = lc_labels, cex = 0.6, border = NA))
 
   dev.off()
   message("PDF:               ", pdf_path)
@@ -1286,10 +1290,13 @@ plot_results <- function(result) {
   col_ndvi <- c("#d73027", "#fc8d59", "#fee08b", "#ffffbf",
                 "#d9ef8b", "#91cf60", "#1a9850", "#006837")
 
+  # Limiter le nombre de cellules pour éviter le timeout RStudio
+  mc <- 250000
+
   # --- Panel 1 : Ortho RVB ---
   p_rvb <- ggplot() +
     geom_spatraster_rgb(data = result$ortho_rvb, r = 1, g = 2, b = 3,
-                        max_col_value = 255) +
+                        max_col_value = 255, maxcell = mc) +
     ggtitle("Ortho RVB IGN (0.20m)") +
     theme_void() +
     theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 11))
@@ -1302,14 +1309,14 @@ plot_results <- function(result) {
   p_irc <- tryCatch({
     ggplot() +
       geom_spatraster_rgb(data = irc_data, r = 1, g = 2, b = 3,
-                          max_col_value = 255) +
+                          max_col_value = 255, maxcell = mc) +
       ggtitle("Ortho IRC fausses couleurs (0.20m)") +
       theme_void() +
       theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 11))
   }, error = function(e) {
     # Fallback : afficher la bande PIR seule
     ggplot() +
-      geom_spatraster(data = result$ortho_irc[[1]]) +
+      geom_spatraster(data = result$ortho_irc[[1]], maxcell = mc) +
       scale_fill_gradient(low = "black", high = "red", name = "PIR",
                           na.value = "transparent") +
       ggtitle("PIR (bande 1 IRC)") +
@@ -1319,7 +1326,7 @@ plot_results <- function(result) {
 
   # --- Panel 3 : NDVI ---
   p_ndvi <- ggplot() +
-    geom_spatraster(data = result$ndvi) +
+    geom_spatraster(data = result$ndvi, maxcell = mc) +
     scale_fill_gradientn(colours = col_ndvi, na.value = "transparent",
                          limits = c(-0.2, 1), name = "NDVI") +
     ggtitle("NDVI (depuis IRC)") +
@@ -1336,7 +1343,7 @@ plot_results <- function(result) {
 
     dtm <- result$dem[["DTM"]]
     p_dtm <- ggplot() +
-      geom_spatraster(data = dtm) +
+      geom_spatraster(data = dtm, maxcell = mc) +
       scale_fill_gradientn(colours = col_elev, na.value = "transparent",
                            name = "Altitude (m)") +
       ggtitle("MNT IGN (RGE ALTI)") +
@@ -1348,7 +1355,7 @@ plot_results <- function(result) {
     col_chm <- c("#ffffcc", "#d9f0a3", "#addd8e", "#78c679",
                  "#41ab5d", "#238443", "#005a32")
     p_chm <- ggplot() +
-      geom_spatraster(data = chm) +
+      geom_spatraster(data = chm, maxcell = mc) +
       scale_fill_gradientn(colours = col_chm, na.value = "transparent",
                            name = "Hauteur (m)") +
       ggtitle("CHM (DSM - DTM)") +
@@ -1360,31 +1367,32 @@ plot_results <- function(result) {
   # --- Panel Occupation du sol ---
   lc <- result$landcover
 
-  # Identifier les classes présentes
-  lc_vals <- unique(na.omit(as.integer(values(lc))))
-  lc_vals <- sort(lc_vals[lc_vals >= 1 & lc_vals <= 15])
+  # Identifier les classes présentes (uniquement celles dans les données)
+  lc_present <- sort(unique(na.omit(as.integer(values(lc)))))
+  lc_present <- lc_present[lc_present >= 1 & lc_present <= 15]
 
-  cls_labels <- COSIA_LABELS_15[lc_vals]
-  cls_colors <- COSIA_COLORS_15[lc_vals]
-  names(cls_colors) <- cls_labels
-
-  # Reclasser en facteur
+  # Reclasser en facteur avec uniquement les classes présentes
   lc_factor <- as.factor(lc)
   levels(lc_factor) <- data.frame(
-    id    = 1:15,
-    label = COSIA_LABELS_15
+    id    = lc_present,
+    label = COSIA_LABELS_15[lc_present]
   )
 
+  cls_colors <- setNames(COSIA_COLORS_15[lc_present],
+                         COSIA_LABELS_15[lc_present])
+
   p_lc <- ggplot() +
-    geom_spatraster(data = lc_factor) +
-    scale_fill_manual(values = setNames(COSIA_COLORS_15, COSIA_LABELS_15),
+    geom_spatraster(data = lc_factor, maxcell = mc) +
+    scale_fill_manual(values = cls_colors,
                       na.value = "transparent", name = "Classe",
                       drop = TRUE) +
+    guides(fill = guide_legend(override.aes = list(colour = NA))) +
     ggtitle("Occupation du sol FLAIR-HUB") +
     theme_void() +
     theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 11),
           legend.position = "right",
-          legend.text = element_text(size = 7))
+          legend.text = element_text(size = 7),
+          legend.key = element_rect(colour = NA))
 
   # --- Assemblage patchwork ---
   if (!is.null(p_dtm)) {
