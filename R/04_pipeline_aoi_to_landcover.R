@@ -423,14 +423,23 @@ download_dem_for_aoi <- function(aoi, output_dir, res_m = 1, rgbi = NULL) {
   }
 
   # Statistiques
-  message(sprintf("  Altitude DTM: %.0f - %.0f m",
-                   min(values(dem[["DTM"]]), na.rm = TRUE),
-                   max(values(dem[["DTM"]]), na.rm = TRUE)))
-  if (has_mns) {
-    chm <- dem[["DSM"]] - dem[["DTM"]]
-    message(sprintf("  Hauteur CHM (DSM-DTM): %.1f - %.1f m",
-                     min(values(chm), na.rm = TRUE),
-                     max(values(chm), na.rm = TRUE)))
+  dtm_vals <- values(dem[["DTM"]], na.rm = TRUE)
+  if (length(dtm_vals) > 0 && any(is.finite(dtm_vals))) {
+    message(sprintf("  Altitude DTM: %.0f - %.0f m",
+                     min(dtm_vals, na.rm = TRUE),
+                     max(dtm_vals, na.rm = TRUE)))
+    if (has_mns) {
+      chm <- dem[["DSM"]] - dem[["DTM"]]
+      chm_vals <- values(chm, na.rm = TRUE)
+      if (length(chm_vals) > 0 && any(is.finite(chm_vals))) {
+        message(sprintf("  Hauteur CHM (DSM-DTM): %.1f - %.1f m",
+                         min(chm_vals, na.rm = TRUE),
+                         max(chm_vals, na.rm = TRUE)))
+      }
+    }
+  } else {
+    message("  ATTENTION: DEM contient uniquement des NA")
+    message("  Le WMS d'élévation a peut-être retourné des données vides.")
   }
 
   # Nettoyer les tuiles temporaires
@@ -920,8 +929,7 @@ pipeline_aoi_to_landcover <- function(aoi_path,
   }
   tryCatch(
     plotRGB(irc_for_plot, r = 1, g = 2, b = 3, stretch = "lin",
-            main = sprintf("Ortho IRC fausses couleurs (0.20m, %d)",
-                           millesime_irc)),
+            main = "Ortho IRC fausses couleurs (0.20m)"),
     error = function(e) {
       # Fallback : afficher la bande PIR seule si plotRGB échoue
       tryCatch({
@@ -962,11 +970,15 @@ pipeline_aoi_to_landcover <- function(aoi_path,
   }
 
   # Occupation du sol — raster catégoriel (valeur → couleur correcte)
+  # Inclure la classe 0 (Non classifié) si elle existe dans les données
   lc_plot <- landcover
-  levels(lc_plot) <- data.frame(id = 1:15, label = COSIA_LABELS_15)
+  lc_ids <- c(0, 1:15)
+  lc_labels <- c("Non classifié", COSIA_LABELS_15)
+  lc_colors <- c("#808080", COSIA_COLORS_15)
+  levels(lc_plot) <- data.frame(id = lc_ids, label = lc_labels)
   plot(lc_plot, main = paste("Occupation du sol -", config_label),
-       col = COSIA_COLORS_15, type = "classes",
-       plg = list(legend = COSIA_LABELS_15, cex = 0.6))
+       col = lc_colors, type = "classes",
+       plg = list(legend = lc_labels, cex = 0.6))
 
   dev.off()
   message("PDF:               ", pdf_path)
@@ -979,7 +991,7 @@ pipeline_aoi_to_landcover <- function(aoi_path,
   for (i in seq_along(class_counts)) {
     cls <- as.integer(names(class_counts)[i])
     pct <- as.numeric(class_counts[i]) / length(lc_vals) * 100
-    label <- if (cls >= 1 && cls <= 15) COSIA_LABELS_15[cls] else "?"
+    label <- if (cls == 0) "Non classifié" else if (cls >= 1 && cls <= 15) COSIA_LABELS_15[cls] else "?"
     message(sprintf("  %2d. %s: %.1f%%", cls, label, pct))
   }
 
@@ -1064,9 +1076,7 @@ plot_results <- function(result) {
     ggplot() +
       geom_spatraster_rgb(data = irc_data, r = 1, g = 2, b = 3,
                           max_col_value = 255) +
-      ggtitle(sprintf("Ortho IRC fausses couleurs (0.20m, %s)",
-                      ifelse(!is.null(result$millesime_irc),
-                             as.character(result$millesime_irc), ""))) +
+      ggtitle("Ortho IRC fausses couleurs (0.20m)") +
       theme_void() +
       theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 11))
   }, error = function(e) {
@@ -1199,14 +1209,6 @@ if (sys.nframe() == 0) {
     message('  # Config LC-B : RGBI + MNT (65.1% mIoU, +1pt)')
     message('  result <- pipeline_aoi_to_landcover("data/aoi.gpkg",')
     message('    use_dem = TRUE, dem_res_m = 1)')
-    message("")
-    message('  # Étude temporellement cohérente (RVB + IRC même année) :')
-    message('  result <- pipeline_aoi_to_landcover("data/aoi.gpkg",')
-    message('    millesime_irc = 2024, millesime_ortho = 2024)')
-    message("")
-    message('  # IRC millésimé + RVB mosaïque nationale (par défaut) :')
-    message('  result <- pipeline_aoi_to_landcover("data/aoi.gpkg",')
-    message('    millesime_irc = 2024)')
     message("")
     message('  # Avec un modèle local :')
     message('  result <- pipeline_aoi_to_landcover("data/aoi.gpkg",')
