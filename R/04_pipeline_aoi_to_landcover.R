@@ -40,12 +40,16 @@ library(curl)
 # La Géoplateforme n'offre pas de service WCS pour l'altimétrie.
 IGN_WMS_URL      <- "https://data.geopf.fr/wms-r"
 IGN_LAYER_ORTHO  <- "ORTHOIMAGERY.ORTHOPHOTOS"
-IGN_LAYER_IRC    <- "ORTHOIMAGERY.ORTHOPHOTOS.IRC-EXPRESS.2024"
+IGN_LAYER_IRC    <- "ORTHOIMAGERY.ORTHOPHOTOS.IRC"
 IGN_LAYER_MNT    <- "ELEVATION.ELEVATIONGRIDCOVERAGE.HIGHRES"
 IGN_LAYER_MNS    <- "ELEVATION.ELEVATIONGRIDCOVERAGE.HIGHRES.MNS"
 # Alternatives LiDAR HD (couverture partielle mais plus précis) :
 # IGN_LAYER_MNT <- "IGNF_LIDAR-HD_MNT_ELEVATION.ELEVATIONGRIDCOVERAGE.LAMB93"
 # IGN_LAYER_MNS <- "IGNF_LIDAR-HD_MNS_ELEVATION.ELEVATIONGRIDCOVERAGE.LAMB93"
+
+# --- Millésimes ortho (NULL = mosaïque la plus récente) ---
+MILLESIME_ORTHO  <- NULL
+MILLESIME_IRC    <- NULL
 
 # --- Résolutions ---
 RES_IGN <- 0.2   # BD ORTHO® IGN
@@ -129,6 +133,25 @@ load_aoi <- function(gpkg_path, layer = NULL) {
 # 2. Gestion du millésime et téléchargement ortho IGN
 # ==============================================================================
 
+#' Construire le nom de couche WMS IGN selon le millésime
+#'
+#' @param type "ortho" ou "irc"
+#' @param millesime NULL (mosaïque la plus récente) ou entier (ex: 2024)
+#' @return Nom de couche WMS
+ign_layer_name <- function(type = c("ortho", "irc"), millesime = NULL) {
+  type <- match.arg(type)
+  if (is.null(millesime)) {
+    if (type == "ortho") return(IGN_LAYER_ORTHO)
+    else                 return(IGN_LAYER_IRC)
+  }
+  millesime <- as.character(millesime)
+  if (type == "ortho") {
+    return(paste0("ORTHOIMAGERY.ORTHOPHOTOS", millesime))
+  } else {
+    return(paste0("ORTHOIMAGERY.ORTHOPHOTOS.IRC.", millesime))
+  }
+}
+
 #' Télécharger une tuile WMS IGN
 #'
 #' @param bbox c(xmin, ymin, xmax, ymax) en Lambert-93
@@ -145,13 +168,14 @@ download_wms_tile <- function(bbox, layer, res_m = RES_IGN, dest_file,
   width  <- round((xmax - xmin) / res_m)
   height <- round((ymax - ymin) / res_m)
 
-  # WMS 1.3.0 avec CRS EPSG:2154 : BBOX = ymin,xmin,ymax,xmax
+  # WMS 1.3.0 avec CRS EPSG:2154 : BBOX = xmin,ymin,xmax,ymax
+  # (EPSG:2154 est un CRS projeté avec axes Easting, Northing)
   wms_url <- paste0(
     IGN_WMS_URL, "?",
     "SERVICE=WMS&VERSION=1.3.0&REQUEST=GetMap",
     "&LAYERS=", layer,
     "&CRS=EPSG:2154",
-    "&BBOX=", paste(ymin, xmin, ymax, xmax, sep = ","),
+    "&BBOX=", paste(xmin, ymin, xmax, ymax, sep = ","),
     "&WIDTH=", width,
     "&HEIGHT=", height,
     "&FORMAT=image/geotiff",
@@ -273,34 +297,94 @@ download_ign_tiled <- function(bbox, layer, res_m = RES_IGN,
 #' ils sont réutilisés sans re-téléchargement.
 #'
 #' Gestion des millésimes (indépendants pour IRC et ortho) :
-#'   - millesime_irc : NULL = auto-détection, entier = IRC-EXPRESS.{année}
-#'   - millesime_ortho : NULL = mosaïque nationale, entier = ORTHO-EXPRESS.{année}
+#'   - millesime_ortho : NULL = mosaïque nationale, entier = année spécifique
+#'   - millesime_irc : NULL = mosaïque la plus récente, entier = année spécifique
+#'   Si le millésime demandé n'est pas disponible, fallback sur la couche courante.
 #'
 #' @param aoi sf object (AOI en Lambert-93)
 #' @param output_dir Répertoire de sortie
 #' @param res_m Résolution en mètres
-#' @return Liste avec rvb (SpatRaster) et irc (SpatRaster)
-download_ortho_for_aoi <- function(aoi, output_dir, res_m = RES_IGN) {
+#' @param millesime_ortho NULL ou entier (année de l'ortho RVB)
+#' @param millesime_irc NULL ou entier (année de l'ortho IRC)
+#' @return Liste avec rvb, irc (SpatRaster), chemins et info millésime
+download_ortho_for_aoi <- function(aoi, output_dir, res_m = RES_IGN,
+                                    millesime_ortho = MILLESIME_ORTHO,
+                                    millesime_irc = MILLESIME_IRC) {
   dir_create(output_dir)
 
+  layer_ortho <- ign_layer_name("ortho", millesime_ortho)
+  layer_irc   <- ign_layer_name("irc",   millesime_irc)
+  label_ortho <- if (is.null(millesime_ortho)) "plus récent" else millesime_ortho
+  label_irc   <- if (is.null(millesime_irc))   "plus récent" else millesime_irc
+
+  rvb_path <- file.path(output_dir, "ortho_rvb.tif")
+  irc_path <- file.path(output_dir, "ortho_irc.tif")
+
+  # Cache : réutiliser les fichiers existants
+  if (file.exists(rvb_path) && file.exists(irc_path)) {
+    message("\n=== Ortho IGN déjà présentes (cache) ===")
+    message(sprintf("  RVB: %s", rvb_path))
+    message(sprintf("  IRC: %s", irc_path))
+    message("Réutilisation des fichiers existants.")
+
+    rvb <- rast(rvb_path)
+    irc <- rast(irc_path)
+    names(rvb)[1:min(3, nlyr(rvb))] <- c("Rouge", "Vert", "Bleu")[1:min(3, nlyr(rvb))]
+    names(irc)[1:min(3, nlyr(irc))] <- c("PIR", "Rouge", "Vert")[1:min(3, nlyr(irc))]
+
+    return(list(rvb = rvb, irc = irc,
+                rvb_path = rvb_path, irc_path = irc_path,
+                millesime_ortho = millesime_ortho,
+                millesime_irc = millesime_irc,
+                layer_ortho = layer_ortho,
+                layer_irc = layer_irc))
+  }
+
   bbox <- as.numeric(st_bbox(st_union(aoi)))
+
   message(sprintf("\n=== Téléchargement ortho IGN pour l'AOI ==="))
   message(sprintf("Emprise: %.0f, %.0f - %.0f, %.0f (Lambert-93)",
                    bbox[1], bbox[2], bbox[3], bbox[4]))
   message(sprintf("Taille: %.0f x %.0f m (%.2f ha)",
                    bbox[3] - bbox[1], bbox[4] - bbox[2],
                    (bbox[3] - bbox[1]) * (bbox[4] - bbox[2]) / 10000))
+  message(sprintf("Millésime RVB: %s (couche: %s)", label_ortho, layer_ortho))
+  message(sprintf("Millésime IRC: %s (couche: %s)", label_irc, layer_irc))
 
-  # --- RVB ---
+  # --- RVB (avec fallback si millésime indisponible) ---
   message("\n--- Ortho RVB ---")
-  rvb <- download_ign_tiled(bbox, layer = IGN_LAYER_ORTHO, res_m = res_m,
-                             output_dir = output_dir, prefix = "rvb")
+  rvb <- tryCatch(
+    download_ign_tiled(bbox, layer = layer_ortho, res_m = res_m,
+                       output_dir = output_dir, prefix = "rvb"),
+    error = function(e) {
+      if (!is.null(millesime_ortho)) {
+        message(sprintf("  Couche %s indisponible, fallback sur %s",
+                        layer_ortho, IGN_LAYER_ORTHO))
+        layer_ortho <<- IGN_LAYER_ORTHO
+        label_ortho <<- "plus récent (fallback)"
+        download_ign_tiled(bbox, layer = IGN_LAYER_ORTHO, res_m = res_m,
+                           output_dir = output_dir, prefix = "rvb")
+      } else stop(e)
+    }
+  )
   names(rvb)[1:min(3, nlyr(rvb))] <- c("Rouge", "Vert", "Bleu")[1:min(3, nlyr(rvb))]
 
-  # --- IRC ---
+  # --- IRC (avec fallback si millésime indisponible) ---
   message("\n--- Ortho IRC ---")
-  irc <- download_ign_tiled(bbox, layer = IGN_LAYER_IRC, res_m = res_m,
-                             output_dir = output_dir, prefix = "irc")
+  irc <- tryCatch(
+    download_ign_tiled(bbox, layer = layer_irc, res_m = res_m,
+                       output_dir = output_dir, prefix = "irc"),
+    error = function(e) {
+      if (!is.null(millesime_irc)) {
+        message(sprintf("  Couche %s indisponible, fallback sur %s",
+                        layer_irc, IGN_LAYER_IRC))
+        layer_irc <<- IGN_LAYER_IRC
+        label_irc <<- "plus récent (fallback)"
+        download_ign_tiled(bbox, layer = IGN_LAYER_IRC, res_m = res_m,
+                           output_dir = output_dir, prefix = "irc")
+      } else stop(e)
+    }
+  )
   names(irc)[1:min(3, nlyr(irc))] <- c("PIR", "Rouge", "Vert")[1:min(3, nlyr(irc))]
 
   # Découper aux limites exactes de l'AOI
@@ -309,10 +393,14 @@ download_ortho_for_aoi <- function(aoi, output_dir, res_m = RES_IGN) {
   irc <- crop(irc, aoi_vect)
 
   # Sauvegarder les mosaïques finales
-  rvb_path <- file.path(output_dir, "ortho_rvb.tif")
-  irc_path <- file.path(output_dir, "ortho_irc.tif")
   writeRaster(rvb, rvb_path, overwrite = TRUE)
   writeRaster(irc, irc_path, overwrite = TRUE)
+
+  # Re-lire depuis les fichiers sauvegardés (terra est file-backed)
+  rvb <- rast(rvb_path)
+  irc <- rast(irc_path)
+  names(rvb)[1:min(3, nlyr(rvb))] <- c("Rouge", "Vert", "Bleu")[1:min(3, nlyr(rvb))]
+  names(irc)[1:min(3, nlyr(irc))] <- c("PIR", "Rouge", "Vert")[1:min(3, nlyr(irc))]
 
   message(sprintf("\nRVB sauvegardé: %s (%d x %d px)", rvb_path, ncol(rvb), nrow(rvb)))
   message(sprintf("IRC sauvegardé: %s (%d x %d px)", irc_path, ncol(irc), nrow(irc)))
@@ -321,14 +409,12 @@ download_ortho_for_aoi <- function(aoi, output_dir, res_m = RES_IGN) {
   tile_files <- dir_ls(output_dir, glob = "*_tile_*.tif")
   if (length(tile_files) > 0) file_delete(tile_files)
 
-  # Re-lire depuis les fichiers sauvegardés (terra est file-backed :
-  # après suppression des tuiles, les objets doivent pointer vers
-  # les fichiers finaux ortho_rvb.tif / ortho_irc.tif)
-  rvb <- rast(rvb_path)
-  irc <- rast(irc_path)
-
   return(list(rvb = rvb, irc = irc,
-              rvb_path = rvb_path, irc_path = irc_path))
+              rvb_path = rvb_path, irc_path = irc_path,
+              millesime_ortho = millesime_ortho,
+              millesime_irc = millesime_irc,
+              layer_ortho = layer_ortho,
+              layer_irc = layer_irc))
 }
 
 # ==============================================================================
@@ -862,6 +948,8 @@ run_inference <- function(rgbi, model_path) {
 #' @param res_m Résolution de téléchargement ortho IGN (0.2m)
 #' @param use_dem Télécharger et utiliser le MNT/MNS IGN (config LC-B, +1pt mIoU)
 #' @param dem_res_m Résolution du MNT (1 = RGE ALTI 1m)
+#' @param millesime_ortho NULL (mosaïque la plus récente) ou entier (ex: 2024)
+#' @param millesime_irc NULL (mosaïque la plus récente) ou entier (ex: 2024)
 #' @return Liste avec tous les résultats
 pipeline_aoi_to_landcover <- function(aoi_path,
                                         output_dir = file.path(getwd(), "outputs"),
@@ -869,7 +957,9 @@ pipeline_aoi_to_landcover <- function(aoi_path,
                                         model_path = NULL,
                                         res_m = RES_IGN,
                                         use_dem = FALSE,
-                                        dem_res_m = 1) {
+                                        dem_res_m = 1,
+                                        millesime_ortho = MILLESIME_ORTHO,
+                                        millesime_irc = MILLESIME_IRC) {
   dir_create(output_dir)
   t0 <- Sys.time()
 
@@ -888,7 +978,9 @@ pipeline_aoi_to_landcover <- function(aoi_path,
   # --- Étape 2 : Télécharger les ortho IGN ---
   message(sprintf("\n>>> ÉTAPE 2/%d : Téléchargement des ortho IGN (RVB + IRC)",
                    n_steps))
-  ortho <- download_ortho_for_aoi(aoi, output_dir = output_dir, res_m = res_m)
+  ortho <- download_ortho_for_aoi(aoi, output_dir = output_dir, res_m = res_m,
+                                    millesime_ortho = millesime_ortho,
+                                    millesime_irc = millesime_irc)
 
   # Combiner RVB + IRC en RGBI
   rgbi <- combine_rvb_irc(ortho$rvb, ortho$irc)
