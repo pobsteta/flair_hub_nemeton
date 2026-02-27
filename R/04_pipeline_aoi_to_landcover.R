@@ -1076,12 +1076,38 @@ pipeline_aoi_to_landcover <- function(aoi_path,
   }
 
   # RVB
-  plotRGB(ortho$rvb, r = 1, g = 2, b = 3, stretch = "lin",
-          main = "Ortho RVB IGN (0.20m)")
+  tryCatch(
+    plotRGB(ortho$rvb, r = 1, g = 2, b = 3, stretch = "lin",
+            main = "Ortho RVB IGN (0.20m)"),
+    error = function(e) {
+      plot.new(); title(main = paste("RVB - erreur:", e$message))
+    }
+  )
 
   # IRC fausses couleurs
-  plotRGB(ortho$irc, r = 1, g = 2, b = 3, stretch = "lin",
-          main = "Ortho IRC fausses couleurs (0.20m)")
+  # L'IRC IGN a 3 bandes : PIR, Rouge, Vert.
+  # plotRGB(r=1,g=2,b=3) → fausses couleurs (PIR en rouge, végétation en rouge vif).
+  # Si le WMS a retourné un canal alpha (4 bandes), on garde seulement les 3 premières.
+  irc_for_plot <- ortho$irc
+  if (nlyr(irc_for_plot) > 3) {
+    irc_for_plot <- irc_for_plot[[1:3]]
+  }
+  tryCatch(
+    plotRGB(irc_for_plot, r = 1, g = 2, b = 3, stretch = "lin",
+            main = sprintf("Ortho IRC fausses couleurs (0.20m, %d)",
+                           millesime_irc)),
+    error = function(e) {
+      # Fallback : afficher la bande PIR seule si plotRGB échoue
+      tryCatch({
+        col_pir <- colorRampPalette(c("black", "red", "yellow", "white"))(100)
+        plot(ortho$irc[[1]], main = "PIR (bande 1 IRC)",
+             col = col_pir, plg = list(title = "PIR"))
+      }, error = function(e2) {
+        plot.new()
+        title(main = paste("IRC - erreur:", e$message))
+      })
+    }
+  )
 
   # NDVI
   col_ndvi <- colorRampPalette(
@@ -1109,10 +1135,11 @@ pipeline_aoi_to_landcover <- function(aoi_path,
          col = col_chm, plg = list(title = "Hauteur (m)"))
   }
 
-  # Occupation du sol
-  plot(landcover, main = paste("Occupation du sol -", config_label),
+  # Occupation du sol — raster catégoriel (valeur → couleur correcte)
+  lc_plot <- landcover
+  levels(lc_plot) <- data.frame(id = 1:15, label = COSIA_LABELS_15)
+  plot(lc_plot, main = paste("Occupation du sol -", config_label),
        col = COSIA_COLORS_15, type = "classes",
-       levels = COSIA_LABELS_15,
        plg = list(legend = COSIA_LABELS_15, cex = 0.6))
 
   dev.off()
@@ -1205,12 +1232,29 @@ plot_results <- function(result) {
     theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 11))
 
   # --- Panel 2 : IRC fausses couleurs ---
-  p_irc <- ggplot() +
-    geom_spatraster_rgb(data = result$ortho_irc, r = 1, g = 2, b = 3,
-                        max_col_value = 255) +
-    ggtitle("Ortho IRC fausses couleurs (0.20m)") +
-    theme_void() +
-    theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 11))
+  # Si le WMS a retourné un canal alpha (4 bandes), garder les 3 premières
+  irc_data <- result$ortho_irc
+  if (nlyr(irc_data) > 3) irc_data <- irc_data[[1:3]]
+
+  p_irc <- tryCatch({
+    ggplot() +
+      geom_spatraster_rgb(data = irc_data, r = 1, g = 2, b = 3,
+                          max_col_value = 255) +
+      ggtitle(sprintf("Ortho IRC fausses couleurs (0.20m, %s)",
+                      ifelse(!is.null(result$millesime_irc),
+                             as.character(result$millesime_irc), ""))) +
+      theme_void() +
+      theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 11))
+  }, error = function(e) {
+    # Fallback : afficher la bande PIR seule
+    ggplot() +
+      geom_spatraster(data = result$ortho_irc[[1]]) +
+      scale_fill_gradient(low = "black", high = "red", name = "PIR",
+                          na.value = "transparent") +
+      ggtitle("PIR (bande 1 IRC)") +
+      theme_void() +
+      theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 11))
+  })
 
   # --- Panel 3 : NDVI ---
   p_ndvi <- ggplot() +
