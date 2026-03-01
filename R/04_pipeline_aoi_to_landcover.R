@@ -9,13 +9,12 @@
 # Workflow :
 #   1. Charger l'AOI depuis aoi.gpkg → reprojection Lambert-93
 #   2. Télécharger les ortho IGN RVB + IRC via WMS (tuiles si nécessaire)
-#      → avec buffer autour de l'AOI pour éviter les effets de bord
 #   2b. Télécharger le MNT/MNS IGN via WMS-R (optionnel, config LC-B)
 #   3. Combiner RVB + IRC en image 4 bandes RGBI
-#   4. Découper en patches de 512x512 à 0.2m (overlap de 32 px)
+#   4. Découper en patches de 512x512 à 0.2m (overlap ajusté au buffer)
 #   5. Inférence du modèle FLAIR-HUB (Swin/ConvNeXTV2) via reticulate
-#   6. Découpe finale aux limites exactes de l'AOI (retrait du buffer)
-#   7. Mosaïquer et exporter la carte d'occupation du sol
+#      → buffer : rognage des bords de chaque patch (partie centrale conservée)
+#   6. Mosaïquer et exporter la carte d'occupation du sol
 #
 # Cache :
 #   Les fichiers téléchargés sont réutilisés s'ils existent déjà dans
@@ -63,14 +62,17 @@ CONDA_ENV  <- "FLAIRHUB"
 # --- Limites WMS ---
 WMS_MAX_PX <- 4096  # Taille max par requête WMS
 
-# --- Buffer anti-effets de bord ---
-# Zone tampon (en mètres) ajoutée autour de l'AOI avant le téléchargement
-# et l'inférence, puis retirée sur les produits finaux (landcover, NDVI).
-# Cela évite les artefacts de bord causés par les patches de 512×512 px
-# qui tomberaient partiellement hors de l'AOI.
-# Valeur recommandée : au moins 1 patch (512 × 0.2m = 102.4m).
-# Mettre à 0 pour désactiver.
-BUFFER_M <- 100
+# --- Buffer anti-effets de bord (inférence) ---
+# Nombre de pixels retiré de chaque bord des patches après prédiction.
+# Seule la partie centrale (plus fiable) de chaque patch est conservée ;
+# les bords, où le réseau de neurones produit des artefacts, sont éliminés.
+# L'overlap entre patches est automatiquement ajusté (= 2 × BUFFER_PX)
+# pour que les parties centrales se joignent sans trou.
+#   - 0   : pas de buffer (overlap = 32 px par défaut)
+#   - 32  : léger (overlap = 64 px,  centre conservé = 448 × 448 px)
+#   - 64  : recommandé (overlap = 128 px, centre conservé = 384 × 384 px)
+#   - 128 : agressif (overlap = 256 px, centre conservé = 256 × 256 px)
+BUFFER_PX <- 64
 
 # --- Classes CoSIA (palette officielle FLAIR-HUB) ---
 COSIA_LABELS_15 <- c(
@@ -339,12 +341,10 @@ validate_wms_data <- function(r, min_pct = 5) {
 #' @param res_m Résolution en mètres
 #' @param millesime_ortho NULL ou entier (année de l'ortho RVB)
 #' @param millesime_irc NULL ou entier (année de l'ortho IRC)
-#' @param buffer_m Buffer en mètres autour de l'AOI (0 = pas de buffer)
 #' @return Liste avec rvb, irc (SpatRaster), chemins et info millésime
 download_ortho_for_aoi <- function(aoi, output_dir, res_m = RES_IGN,
                                     millesime_ortho = MILLESIME_ORTHO,
-                                    millesime_irc = MILLESIME_IRC,
-                                    buffer_m = 0) {
+                                    millesime_irc = MILLESIME_IRC) {
   dir_create(output_dir)
 
   layer_ortho <- ign_layer_name("ortho", millesime_ortho)
@@ -375,15 +375,7 @@ download_ortho_for_aoi <- function(aoi, output_dir, res_m = RES_IGN,
                 layer_irc = layer_irc))
   }
 
-  # Emprise de travail : AOI + buffer pour éviter les effets de bord
-  aoi_union <- st_union(aoi)
-  if (buffer_m > 0) {
-    aoi_work <- st_buffer(aoi_union, buffer_m)
-    message(sprintf("Buffer de %dm appliqué autour de l'AOI", buffer_m))
-  } else {
-    aoi_work <- aoi_union
-  }
-  bbox <- as.numeric(st_bbox(aoi_work))
+  bbox <- as.numeric(st_bbox(st_union(aoi)))
 
   message(sprintf("\n=== Téléchargement ortho IGN pour l'AOI ==="))
   message(sprintf("Emprise: %.0f, %.0f - %.0f, %.0f (Lambert-93)",
@@ -448,11 +440,10 @@ download_ortho_for_aoi <- function(aoi, output_dir, res_m = RES_IGN,
   if (is.null(irc)) stop("Impossible de télécharger l'ortho IRC")
   names(irc)[1:min(3, nlyr(irc))] <- c("PIR", "Rouge", "Vert")[1:min(3, nlyr(irc))]
 
-  # Découper à l'emprise de travail (AOI + buffer éventuel)
-  # La découpe finale aux limites exactes de l'AOI se fait après l'inférence
-  aoi_work_vect <- vect(aoi_work)
-  rvb <- crop(rvb, aoi_work_vect)
-  irc <- crop(irc, aoi_work_vect)
+  # Découper aux limites exactes de l'AOI
+  aoi_vect <- vect(st_union(aoi))
+  rvb <- crop(rvb, aoi_vect)
+  irc <- crop(irc, aoi_vect)
 
   # Sauvegarder les mosaïques finales
   writeRaster(rvb, rvb_path, overwrite = TRUE)
@@ -507,10 +498,8 @@ download_ortho_for_aoi <- function(aoi, output_dir, res_m = RES_IGN,
 #' @param output_dir Répertoire de sortie
 #' @param res_m Résolution du MNT (1 = RGE ALTI 1m)
 #' @param rgbi SpatRaster de référence pour le rééchantillonnage à 0.2m
-#' @param buffer_m Buffer en mètres autour de l'AOI (0 = pas de buffer)
 #' @return Liste avec dem (SpatRaster 2 bandes DSM+DTM) et dem_path
-download_dem_for_aoi <- function(aoi, output_dir, res_m = 1, rgbi = NULL,
-                                  buffer_m = 0) {
+download_dem_for_aoi <- function(aoi, output_dir, res_m = 1, rgbi = NULL) {
   dir_create(output_dir)
 
   dem_path <- file.path(output_dir, "dem_dsm_dtm.tif")
@@ -525,14 +514,7 @@ download_dem_for_aoi <- function(aoi, output_dir, res_m = 1, rgbi = NULL,
     return(list(dem = dem, dem_path = dem_path))
   }
 
-  # Emprise de travail : AOI + buffer
-  aoi_union <- st_union(aoi)
-  if (buffer_m > 0) {
-    aoi_work <- st_buffer(aoi_union, buffer_m)
-  } else {
-    aoi_work <- aoi_union
-  }
-  bbox <- as.numeric(st_bbox(aoi_work))
+  bbox <- as.numeric(st_bbox(st_union(aoi)))
   message(sprintf("\n=== Téléchargement MNT/MNS IGN (RGE ALTI %dm via WMS-R) ===",
                    res_m))
 
@@ -563,11 +545,11 @@ download_dem_for_aoi <- function(aoi, output_dir, res_m = 1, rgbi = NULL,
     }
   )
 
-  # Découper à l'emprise de travail (AOI + buffer éventuel)
-  aoi_work_vect <- vect(aoi_work)
+  # Découper aux limites de l'AOI
+  aoi_vect <- vect(st_union(aoi))
 
-  if (!is.null(dtm)) dtm <- crop(dtm, aoi_work_vect)
-  if (!is.null(dsm)) dsm <- crop(dsm, aoi_work_vect)
+  if (!is.null(dtm)) dtm <- crop(dtm, aoi_vect)
+  if (!is.null(dsm)) dsm <- crop(dsm, aoi_vect)
 
   # Si le MNS n'est pas disponible, utiliser le MNT seul
   # (DSM = DTM → CHM = 0, pas d'info de hauteur mais on garde l'altitude)
@@ -1028,10 +1010,34 @@ print(f"Prédit: {np.unique(pred).shape[0]} classes uniques")
 }
 
 #' Pipeline d'inférence complet
-run_inference <- function(rgbi, model_path) {
+#'
+#' Si buffer_px > 0, chaque patch prédit est rogné de buffer_px pixels
+#' sur ses bords intérieurs (ceux qui ne touchent pas le bord du raster).
+#' Seule la partie centrale — plus fiable — est conservée pour le mosaïquage.
+#' L'overlap entre patches est automatiquement porté à 2 × buffer_px.
+#'
+#' @param rgbi SpatRaster 4 bandes (Rouge, Vert, Bleu, PIR)
+#' @param model_path Chemin vers le modèle FLAIR-HUB
+#' @param buffer_px Nombre de pixels à retirer de chaque bord intérieur
+#'   après prédiction (0 = pas de trimming)
+#' @return SpatRaster 1 bande (landcover)
+run_inference <- function(rgbi, model_path, buffer_px = 0) {
   message("\n=== Inférence FLAIR-HUB ===")
 
-  patches <- make_inference_patches(rgbi)
+  # Overlap suffisant pour que les centres se joignent après trimming
+  effective_overlap <- if (buffer_px > 0) max(32, 2 * buffer_px) else 32
+  if (buffer_px > 0) {
+    message(sprintf("Buffer: %d px par bord, overlap ajusté à %d px",
+                     buffer_px, effective_overlap))
+  }
+
+  patches <- make_inference_patches(rgbi, overlap = effective_overlap)
+
+  # Emprise du raster original (pour détecter les bords)
+  orig_ext <- ext(rgbi)
+  pixel_res <- res(rgbi)[1]
+  buffer_m <- buffer_px * pixel_res
+  tol <- pixel_res * 0.5
 
   predictions <- list()
   for (i in seq_along(patches)) {
@@ -1039,6 +1045,16 @@ run_inference <- function(rgbi, model_path) {
     message(sprintf("  Patch %d/%d: %s", i, length(patches), patch_name))
     pred <- predict_patch(patches[[i]], model_path)
     if (!is.null(pred)) {
+      # Rogner les bords intérieurs du patch (pas les bords du raster)
+      if (buffer_px > 0) {
+        pe <- ext(pred)
+        # Ne rogner que les côtés qui ne touchent pas le bord du raster
+        trim_xmin <- if (pe[1] > orig_ext[1] + tol) pe[1] + buffer_m else pe[1]
+        trim_xmax <- if (pe[2] < orig_ext[2] - tol) pe[2] - buffer_m else pe[2]
+        trim_ymin <- if (pe[3] > orig_ext[3] + tol) pe[3] + buffer_m else pe[3]
+        trim_ymax <- if (pe[4] < orig_ext[4] - tol) pe[4] - buffer_m else pe[4]
+        pred <- crop(pred, ext(trim_xmin, trim_xmax, trim_ymin, trim_ymax))
+      }
       predictions[[patch_name]] <- pred
     }
   }
@@ -1073,11 +1089,11 @@ run_inference <- function(rgbi, model_path) {
 #' @param dem_res_m Résolution du MNT (1 = RGE ALTI 1m)
 #' @param millesime_ortho NULL (mosaïque la plus récente) ou entier (ex: 2024)
 #' @param millesime_irc NULL (mosaïque la plus récente) ou entier (ex: 2024)
-#' @param buffer_m Buffer en mètres autour de l'AOI pour éviter les effets de
-#'   bord lors de l'inférence (défaut: BUFFER_M). Les données sont téléchargées
-#'   sur l'emprise AOI + buffer, l'inférence est réalisée sur cette emprise
-#'   élargie, puis les produits finaux sont découpés aux limites exactes de
-#'   l'AOI. Mettre à 0 pour désactiver.
+#' @param buffer_px Buffer en pixels retiré de chaque bord des patches après
+#'   prédiction (défaut: BUFFER_PX). Seule la partie centrale de chaque patch
+#'   est conservée, ce qui élimine les artefacts de bord du réseau de neurones.
+#'   L'overlap entre patches est automatiquement ajusté (= 2 × buffer_px).
+#'   Mettre à 0 pour désactiver.
 #' @return Liste avec tous les résultats
 pipeline_aoi_to_landcover <- function(aoi_path,
                                         output_dir = file.path(getwd(), "outputs"),
@@ -1088,7 +1104,7 @@ pipeline_aoi_to_landcover <- function(aoi_path,
                                         dem_res_m = 1,
                                         millesime_ortho = MILLESIME_ORTHO,
                                         millesime_irc = MILLESIME_IRC,
-                                        buffer_m = BUFFER_M) {
+                                        buffer_px = BUFFER_PX) {
   dir_create(output_dir)
   t0 <- Sys.time()
 
@@ -1098,8 +1114,8 @@ pipeline_aoi_to_landcover <- function(aoi_path,
   message("##############################################################")
   message("#  Pipeline FLAIR-HUB : AOI → Ortho IGN → Occupation du sol  #")
   message(sprintf("#  Configuration: %s", config_label))
-  if (buffer_m > 0) {
-    message(sprintf("#  Buffer anti-effets de bord: %dm", buffer_m))
+  if (buffer_px > 0) {
+    message(sprintf("#  Buffer inférence: %d px par bord", buffer_px))
   }
   message("##############################################################\n")
 
@@ -1112,8 +1128,7 @@ pipeline_aoi_to_landcover <- function(aoi_path,
                    n_steps))
   ortho <- download_ortho_for_aoi(aoi, output_dir = output_dir, res_m = res_m,
                                     millesime_ortho = millesime_ortho,
-                                    millesime_irc = millesime_irc,
-                                    buffer_m = buffer_m)
+                                    millesime_irc = millesime_irc)
 
   # Combiner RVB + IRC en RGBI
   rgbi <- combine_rvb_irc(ortho$rvb, ortho$irc)
@@ -1127,8 +1142,7 @@ pipeline_aoi_to_landcover <- function(aoi_path,
     message(sprintf("\n>>> ÉTAPE %d/%d : Téléchargement MNT/MNS IGN (RGE ALTI %dm)",
                      step_dem, n_steps, dem_res_m))
     dem_data <- download_dem_for_aoi(aoi, output_dir = output_dir,
-                                      res_m = dem_res_m, rgbi = rgbi,
-                                      buffer_m = buffer_m)
+                                      res_m = dem_res_m, rgbi = rgbi)
   }
 
   # --- Étape 3/4 : Configurer Python + modèle ---
@@ -1147,21 +1161,7 @@ pipeline_aoi_to_landcover <- function(aoi_path,
   message(sprintf("\n>>> ÉTAPE %d/%d : Inférence du modèle %s",
                    step_inf, n_steps, model_name))
 
-  landcover <- run_inference(rgbi, model_path)
-
-  # --- Découpe finale aux limites exactes de l'AOI (retrait du buffer) ---
-  if (buffer_m > 0) {
-    message("\nDécoupe finale aux limites exactes de l'AOI (retrait du buffer)...")
-    aoi_exact_vect <- vect(st_union(aoi))
-    landcover <- crop(landcover, aoi_exact_vect)
-    # Recadrer aussi les ortho pour la visualisation et le NDVI
-    ortho$rvb <- crop(ortho$rvb, aoi_exact_vect)
-    ortho$irc <- crop(ortho$irc, aoi_exact_vect)
-    rgbi <- crop(rgbi, aoi_exact_vect)
-    if (!is.null(dem_data)) {
-      dem_data$dem <- crop(dem_data$dem, aoi_exact_vect)
-    }
-  }
+  landcover <- run_inference(rgbi, model_path, buffer_px = buffer_px)
 
   # --- Étape 5/6 : Export ---
   step_exp <- if (use_dem) 6 else 5
