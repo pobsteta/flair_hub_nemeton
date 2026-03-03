@@ -74,6 +74,33 @@ WMS_MAX_PX <- 4096  # Taille max par requête WMS
 #   - 128 : agressif (overlap = 256 px, centre conservé = 256 × 256 px)
 BUFFER_PX <- 64
 
+# --- Registre des modèles FLAIR supportés ---
+# Chaque entrée décrit l'architecture du modèle pour l'instanciation automatique.
+# Le champ 'decoder' correspond à la classe smp (segmentation_models_pytorch).
+# Le champ 'encoder' correspond au nom timm / smp de l'encodeur.
+FLAIR_MODELS <- list(
+  "FLAIR-INC_rgbi_15cl_resnet34-unet" = list(
+    hf_repo = "IGNF/FLAIR-INC_rgbi_15cl_resnet34-unet",
+    encoder = "resnet34", decoder = "Unet",
+    in_channels = 4, n_out = 19, n_classes = 15
+  ),
+  "FLAIR-INC_rgb_15cl_resnet34-unet" = list(
+    hf_repo = "IGNF/FLAIR-INC_rgb_15cl_resnet34-unet",
+    encoder = "resnet34", decoder = "Unet",
+    in_channels = 3, n_out = 19, n_classes = 15
+  ),
+  "FLAIR-INC_rgbie_15cl_resnet34-unet" = list(
+    hf_repo = "IGNF/FLAIR-INC_rgbie_15cl_resnet34-unet",
+    encoder = "resnet34", decoder = "Unet",
+    in_channels = 5, n_out = 19, n_classes = 15
+  ),
+  "FLAIR-INC_rgb_12cl_resnet34-unet" = list(
+    hf_repo = "IGNF/FLAIR-INC_rgb_12cl_resnet34-unet",
+    encoder = "resnet34", decoder = "Unet",
+    in_channels = 3, n_out = 19, n_classes = 12
+  )
+)
+
 # --- Classes CoSIA (palette officielle FLAIR-HUB) ---
 COSIA_LABELS_15 <- c(
   "Bâtiment", "Serre", "Piscine", "Imperméable", "Perméable",
@@ -680,31 +707,64 @@ setup_python <- function() {
   }
 }
 
+#' Trouver le nom du fichier checkpoint dans un dépôt HF via l'API
+#'
+#' @param hf_repo Identifiant du dépôt HF (ex: "IGNF/FLAIR-INC_rgbi_15cl_resnet34-unet")
+#' @return Nom du fichier checkpoint (.ckpt, .pth, .pt, .bin, .safetensors)
+find_checkpoint_name <- function(hf_repo) {
+  url <- paste0("https://huggingface.co/api/models/", hf_repo)
+  resp <- tryCatch(
+    httr2::request(url) |> httr2::req_perform(),
+    error = function(e) NULL
+  )
+  if (is.null(resp)) return(NULL)
+
+  info <- jsonlite::fromJSON(httr2::resp_body_string(resp))
+  files <- info$siblings$rfilename
+  ckpt_files <- files[grepl("\\.(ckpt|pth|pt|bin|safetensors)$", files)]
+  if (length(ckpt_files) == 0) return(NULL)
+  return(ckpt_files[1])
+}
+
 #' Télécharger un modèle FLAIR depuis Hugging Face
 #'
-#' Par défaut, utilise FLAIR-INC_rgbi_15cl_resnet34-unet (le plus simple).
-#' Pour le modèle FLAIR-HUB multimodal, utiliser "FLAIR-HUB_LC-G_utae".
+#' Utilise le package R hfhub (natif, sans Python) pour télécharger
+#' le fichier checkpoint. Fallback sur Python huggingface_hub si hfhub
+#' n'est pas installé.
 #'
-#' @param model_name Nom du modèle
-#' @return Chemin local du modèle
+#' @param model_name Nom du modèle (voir FLAIR_MODELS pour la liste)
+#' @return Chemin local du modèle (fichier ou répertoire)
 download_model <- function(model_name = "FLAIR-INC_rgbi_15cl_resnet34-unet") {
-  library(reticulate)
-  hf_hub <- import("huggingface_hub")
+  config <- FLAIR_MODELS[[model_name]]
+  hf_repo <- if (!is.null(config)) config$hf_repo else paste0("IGNF/", model_name)
 
-  hf_repo <- paste0("IGNF/", model_name)
   message("Téléchargement du modèle: ", model_name)
   message("Depuis: ", hf_repo)
 
+  # --- Méthode 1 : hfhub R natif (préféré) ---
+  if (requireNamespace("hfhub", quietly = TRUE)) {
+    ckpt_name <- find_checkpoint_name(hf_repo)
+    if (!is.null(ckpt_name)) {
+      message("  Téléchargement via hfhub (R natif): ", ckpt_name)
+      tryCatch({
+        local_path <- hfhub::hub_download(hf_repo, ckpt_name)
+        message("  Modèle téléchargé: ", local_path)
+        return(local_path)
+      }, error = function(e) {
+        message("  hfhub échoué: ", e$message, " → fallback Python")
+      })
+    }
+  }
+
+  # --- Méthode 2 : Python huggingface_hub (fallback) ---
+  library(reticulate)
+  hf_hub <- import("huggingface_hub")
   tryCatch({
-    local_dir <- hf_hub$snapshot_download(
-      repo_id = hf_repo,
-      repo_type = "model"
-    )
-    message("Modèle téléchargé: ", local_dir)
+    local_dir <- hf_hub$snapshot_download(repo_id = hf_repo, repo_type = "model")
+    message("  Modèle téléchargé: ", local_dir)
     return(local_dir)
   }, error = function(e) {
-    message("Erreur: ", e$message)
-    stop("Échec du téléchargement du modèle.", call. = FALSE)
+    stop("Échec du téléchargement: ", e$message, call. = FALSE)
   })
 }
 
@@ -764,11 +824,22 @@ make_inference_patches <- function(r, patch_size = PATCH_SIZE, overlap = 32) {
   return(patches)
 }
 
-#' Inférence sur un patch avec le modèle FLAIR-INC (smp.Unet + ResNet34)
+#' Inférence sur un patch avec un modèle FLAIR (multi-architecture)
 #'
-#' Charge le modèle, normalise l'image, exécute l'inférence PyTorch,
+#' Instancie le modèle smp selon la config (encoder/decoder dynamiques),
+#' charge les poids, normalise l'image, exécute l'inférence PyTorch,
 #' et remappe les classes FLAIR-1 vers la nomenclature CoSIA.
-predict_patch <- function(patch, model_path, n_classes = 15, ...) {
+#'
+#' @param patch SpatRaster (1 patch)
+#' @param model_path Chemin vers le checkpoint (.ckpt) ou le répertoire du modèle
+#' @param model_config Liste avec encoder, decoder, in_channels, n_out
+#'   (NULL = config par défaut ResNet34 + UNet)
+#' @return SpatRaster 1 bande (landcover) ou NULL en cas d'erreur
+predict_patch <- function(patch, model_path, model_config = NULL, ...) {
+  if (is.null(model_config)) {
+    model_config <- list(encoder = "resnet34", decoder = "Unet",
+                         in_channels = 4, n_out = 19)
+  }
   library(reticulate)
 
   tmp_in <- tempfile(fileext = ".tif")
@@ -817,18 +888,19 @@ if ckpt_path is not None:
     print(f"Fichier modèle: {os.path.basename(ckpt_path)}")
 
     # ==================================================================
-    # 3. Instancier le modèle smp.Unet(ResNet34)
-    #    Le FLAIR-INC 15cl produit 19 logits (4 classes désactivées)
+    # 3. Instancier le modèle (architecture dynamique via config R)
     # ==================================================================
-    in_ch = min(num_bands, 4)
-    n_out = 19  # FLAIR-INC architecture : 19 sorties (15 actives)
+    in_ch = min(num_bands, __IN_CHANNELS__)
+    n_out = __N_OUT__
 
-    model = smp.Unet(
-        encoder_name="resnet34",
+    decoder_class = getattr(smp, "__DECODER__")
+    model = decoder_class(
+        encoder_name="__ENCODER__",
         encoder_weights=None,
         in_channels=in_ch,
         classes=n_out,
     )
+    arch_label = "__DECODER__(__ENCODER__)"
 
     # ==================================================================
     # 4. Charger les poids depuis le checkpoint
@@ -900,7 +972,7 @@ if ckpt_path is not None:
         else:
             model.eval()
             model_loaded = True
-            print("Modèle chargé avec succès (smp.Unet ResNet34)")
+            print(f"Modèle chargé avec succès ({arch_label})")
 
     except Exception as e:
         print(f"Erreur chargement modèle: {e}")
@@ -911,13 +983,14 @@ if ckpt_path is not None:
 # ======================================================================
 if model_loaded:
     # Normalisation FLAIR (centre-réduit, statistiques TRAIN+VAL)
-    #   Bandes : R, G, B, NIR
-    norm_means = np.array([105.08, 110.87, 101.82, 106.38], dtype=np.float32)
-    norm_stds  = np.array([52.17, 45.38, 44.0, 39.69], dtype=np.float32)
+    #   Bandes : R, G, B, NIR, (Elevation)
+    norm_means = np.array([105.08, 110.87, 101.82, 106.38, 0.0], dtype=np.float32)
+    norm_stds  = np.array([52.17, 45.38, 44.0, 39.69, 1.0], dtype=np.float32)
 
-    img = image[:4]  # Garder seulement RGBI
+    img = image[:in_ch]
     for c in range(img.shape[0]):
-        img[c] = (img[c] - norm_means[c]) / norm_stds[c]
+        if c < len(norm_means):
+            img[c] = (img[c] - norm_means[c]) / norm_stds[c]
 
     # Padding si le patch est plus petit que 512x512
     pad_h = max(0, 512 - H)
@@ -1017,6 +1090,10 @@ print(f"Prédit: {np.unique(pred).shape[0]} classes uniques")
   py_code <- gsub("__INPUT_PATH__", tmp_in_py, py_code, fixed = TRUE)
   py_code <- gsub("__MODEL_PATH__", model_path_py, py_code, fixed = TRUE)
   py_code <- gsub("__OUTPUT_PATH__", tmp_out_py, py_code, fixed = TRUE)
+  py_code <- gsub("__DECODER__", model_config$decoder, py_code, fixed = TRUE)
+  py_code <- gsub("__ENCODER__", model_config$encoder, py_code, fixed = TRUE)
+  py_code <- gsub("__IN_CHANNELS__", as.character(model_config$in_channels), py_code, fixed = TRUE)
+  py_code <- gsub("__N_OUT__", as.character(model_config$n_out), py_code, fixed = TRUE)
 
   tryCatch({
     py_run_string(py_code)
@@ -1045,8 +1122,10 @@ print(f"Prédit: {np.unique(pred).shape[0]} classes uniques")
 #' @param model_path Chemin vers le modèle FLAIR-HUB
 #' @param buffer_px Nombre de pixels à retirer de chaque bord intérieur
 #'   après prédiction (0 = pas de trimming)
+#' @param model_config Liste avec encoder, decoder, in_channels, n_out
+#'   (NULL = config par défaut ResNet34 + UNet)
 #' @return SpatRaster 1 bande (landcover)
-run_inference <- function(rgbi, model_path, buffer_px = 0) {
+run_inference <- function(rgbi, model_path, buffer_px = 0, model_config = NULL) {
   message("\n=== Inférence FLAIR-HUB ===")
 
   # Overlap suffisant pour que les centres se joignent après trimming
@@ -1068,7 +1147,7 @@ run_inference <- function(rgbi, model_path, buffer_px = 0) {
   for (i in seq_along(patches)) {
     patch_name <- names(patches)[i]
     message(sprintf("  Patch %d/%d: %s", i, length(patches), patch_name))
-    pred <- predict_patch(patches[[i]], model_path)
+    pred <- predict_patch(patches[[i]], model_path, model_config = model_config)
     if (!is.null(pred)) {
       # Rogner les bords intérieurs du patch (pas les bords du raster)
       if (buffer_px > 0) {
@@ -1181,12 +1260,16 @@ pipeline_aoi_to_landcover <- function(aoi_path,
     message("Utilisation du modèle local: ", model_path)
   }
 
+  # Récupérer la config architecture du modèle
+  model_config <- FLAIR_MODELS[[model_name]]
+
   # --- Étape 4/5 : Inférence ---
   step_inf <- if (use_dem) 5 else 4
   message(sprintf("\n>>> ÉTAPE %d/%d : Inférence du modèle %s",
                    step_inf, n_steps, model_name))
 
-  landcover <- run_inference(rgbi, model_path, buffer_px = buffer_px)
+  landcover <- run_inference(rgbi, model_path, buffer_px = buffer_px,
+                             model_config = model_config)
 
   # --- Étape 5/6 : Export ---
   step_exp <- if (use_dem) 6 else 5
@@ -1519,8 +1602,12 @@ if (sys.nframe() == 0) {
     message("\nUtilisation:")
     message('  source("R/04_pipeline_aoi_to_landcover.R")')
     message("")
-    message('  # Config LC-A : RGBI seul (64.1% mIoU)')
+    message('  # Modèle par défaut (RGBI, 15 classes, ResNet34+UNet)')
     message('  result <- pipeline_aoi_to_landcover("data/aoi.gpkg")')
+    message("")
+    message('  # Modèle RGB 15 classes')
+    message('  result <- pipeline_aoi_to_landcover("data/aoi.gpkg",')
+    message('    model_name = "FLAIR-INC_rgb_15cl_resnet34-unet")')
     message("")
     message('  # Config LC-B : RGBI + MNT (65.1% mIoU, +1pt)')
     message('  result <- pipeline_aoi_to_landcover("data/aoi.gpkg",')
@@ -1529,6 +1616,13 @@ if (sys.nframe() == 0) {
     message('  # Avec un modèle local :')
     message('  result <- pipeline_aoi_to_landcover("data/aoi.gpkg",')
     message('    model_path = "chemin/vers/modele/")')
+    message("")
+    message("Modèles disponibles :")
+    for (nm in names(FLAIR_MODELS)) {
+      cfg <- FLAIR_MODELS[[nm]]
+      message(sprintf("  - %s  [%s(%s), %dch]",
+                        nm, cfg$decoder, cfg$encoder, cfg$in_channels))
+    }
     message("")
     message("Le fichier aoi.gpkg doit contenir un polygone définissant")
     message("votre zone d'intérêt (n'importe quel CRS, sera reprojeté")
