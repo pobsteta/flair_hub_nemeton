@@ -1406,7 +1406,10 @@ pipeline_aoi_to_landcover <- function(aoi_path,
 
   # --- Visualisation récapitulative ---
   pdf_path <- file.path(output_dir, paste0("resultats_", model_name, ".pdf"))
-  n_panels <- if (use_dem && !is.null(dem_data)) 6 else 4
+  has_dem <- !is.null(dem_data)
+  model_uses_elev <- !is.null(model_config) && model_config$in_channels >= 5
+  show_dem <- has_dem && (use_dem || model_uses_elev)
+  n_panels <- if (show_dem) 6 else 4
   pdf_w <- if (n_panels > 4) 18 else 16
   pdf(pdf_path, width = pdf_w, height = 12)
 
@@ -1457,22 +1460,35 @@ pipeline_aoi_to_landcover <- function(aoi_path,
   plot(ndvi, main = "NDVI (depuis IRC)", col = col_ndvi,
        range = c(-0.2, 1), plg = list(title = "NDVI"))
 
-  # MNT si disponible
-  if (!is.null(dem_data)) {
+  # MNT / DSM si disponible
+  if (show_dem) {
     col_elev <- colorRampPalette(
       c("#313695", "#4575b4", "#74add1", "#abd9e9", "#fee090",
         "#fdae61", "#f46d43", "#d73027", "#a50026")
     )(100)
-    plot(dem_data$dem[["DTM"]], main = sprintf("MNT IGN (RGE ALTI %dm)", dem_res_m),
-         col = col_elev, plg = list(title = "Altitude (m)"))
 
-    chm <- dem_data$dem[["DSM"]] - dem_data$dem[["DTM"]]
-    col_chm <- colorRampPalette(
-      c("#ffffcc", "#d9f0a3", "#addd8e", "#78c679",
-        "#41ab5d", "#238443", "#005a32")
-    )(100)
-    plot(chm, main = "CHM (DSM - DTM)",
-         col = col_chm, plg = list(title = "Hauteur (m)"))
+    if (model_uses_elev) {
+      # Modèle RGBIE : montrer le DSM (5ème bande d'entrée) et le MNT
+      plot(dem_data$dem[["DSM"]],
+           main = "DSM - Élévation (5ème bande modèle)",
+           col = col_elev, plg = list(title = "Altitude (m)"))
+      plot(dem_data$dem[["DTM"]],
+           main = sprintf("MNT IGN (RGE ALTI %dm)", dem_res_m),
+           col = col_elev, plg = list(title = "Altitude (m)"))
+    } else {
+      # Modèle sans élévation : MNT + CHM
+      plot(dem_data$dem[["DTM"]],
+           main = sprintf("MNT IGN (RGE ALTI %dm)", dem_res_m),
+           col = col_elev, plg = list(title = "Altitude (m)"))
+
+      chm <- dem_data$dem[["DSM"]] - dem_data$dem[["DTM"]]
+      col_chm <- colorRampPalette(
+        c("#ffffcc", "#d9f0a3", "#addd8e", "#78c679",
+          "#41ab5d", "#238443", "#005a32")
+      )(100)
+      plot(chm, main = "CHM (DSM - DTM)",
+           col = col_chm, plg = list(title = "Hauteur (m)"))
+    }
   }
 
   # Occupation du sol — raster catégoriel (uniquement les classes présentes)
