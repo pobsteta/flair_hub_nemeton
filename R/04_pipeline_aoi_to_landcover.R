@@ -1405,7 +1405,7 @@ pipeline_aoi_to_landcover <- function(aoi_path,
   message("NDVI:              ", ndvi_path)
 
   # --- Visualisation récapitulative ---
-  pdf_path <- file.path(output_dir, "resultats_aoi_flair_hub.pdf")
+  pdf_path <- file.path(output_dir, paste0("resultats_", model_name, ".pdf"))
   n_panels <- if (use_dem && !is.null(dem_data)) 6 else 4
   pdf_w <- if (n_panels > 4) 18 else 16
   pdf(pdf_path, width = pdf_w, height = 12)
@@ -1486,7 +1486,7 @@ pipeline_aoi_to_landcover <- function(aoi_path,
     if (cls == 0) "#808080" else COSIA_COLORS_15[cls]
   }, character(1))
   levels(lc_plot) <- data.frame(id = lc_ids, label = lc_labels)
-  plot(lc_plot, main = paste("Occupation du sol -", config_label),
+  plot(lc_plot, main = paste0("Occupation du sol - ", model_name, "\n", config_label),
        col = lc_colors, type = "classes",
        plg = list(legend = lc_labels, cex = 0.6, border = NA))
 
