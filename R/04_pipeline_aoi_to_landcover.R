@@ -62,16 +62,16 @@ CONDA_ENV  <- "FLAIRHUB"
 # --- Limites WMS ---
 WMS_MAX_PX <- 4096  # Taille max par requête WMS
 
-# --- Buffer anti-effets de bord (inférence) ---
-# Nombre de pixels retiré de chaque bord des patches après prédiction.
-# Seule la partie centrale (plus fiable) de chaque patch est conservée ;
-# les bords, où le réseau de neurones produit des artefacts, sont éliminés.
-# L'overlap entre patches est automatiquement ajusté (= 2 × BUFFER_PX)
-# pour que les parties centrales se joignent sans trou.
-#   - 0   : pas de buffer (overlap = 32 px par défaut)
-#   - 32  : léger (overlap = 64 px,  centre conservé = 448 × 448 px)
-#   - 64  : recommandé (overlap = 128 px, centre conservé = 384 × 384 px)
-#   - 128 : agressif (overlap = 256 px, centre conservé = 256 × 256 px)
+# --- Buffer / overlap pour le blending (inférence) ---
+# Contrôle l'overlap entre patches : overlap = max(64, 2 × BUFFER_PX).
+# Le mosaïquage utilise une fenêtre de Hann (cosinus 2D) : chaque pixel
+# reçoit la prédiction du patch dont le centre est le plus proche.
+# Cela élimine naturellement les artefacts de bord du réseau de neurones
+# et produit une mosaïque sans couture visible.
+#   - 0   : overlap minimal de 64 px (blending léger)
+#   - 32  : overlap = 64 px  (identique à 0)
+#   - 64  : recommandé (overlap = 128 px, bon compromis qualité/vitesse)
+#   - 128 : agressif (overlap = 256 px, meilleur blending mais plus lent)
 BUFFER_PX <- 64
 
 # --- Registre des modèles FLAIR supportés ---
@@ -1111,69 +1111,117 @@ print(f"Prédit: {np.unique(pred).shape[0]} classes uniques")
   })
 }
 
-#' Pipeline d'inférence complet
+#' Pipeline d'inférence complet avec blending par fenêtre de Hann
 #'
-#' Si buffer_px > 0, chaque patch prédit est rogné de buffer_px pixels
-#' sur ses bords intérieurs (ceux qui ne touchent pas le bord du raster).
-#' Seule la partie centrale — plus fiable — est conservée pour le mosaïquage.
-#' L'overlap entre patches est automatiquement porté à 2 × buffer_px.
+#' Utilise une fenêtre de Hann (cosinus) 2D pour pondérer chaque patch
+#' par la distance à son centre. Pour chaque pixel, la prédiction retenue
+#' est celle du patch dont le centre est le plus proche (poids maximal).
+#' Cela élimine naturellement les artefacts de bord du réseau de neurones
+#' et produit une mosaïque sans coutures visibles.
 #'
 #' @param rgbi SpatRaster 4 bandes (Rouge, Vert, Bleu, PIR)
 #' @param model_path Chemin vers le modèle FLAIR-HUB
-#' @param buffer_px Nombre de pixels à retirer de chaque bord intérieur
-#'   après prédiction (0 = pas de trimming)
+#' @param buffer_px Contrôle l'overlap entre patches : overlap = max(64, 2 × buffer_px).
+#'   Plus la valeur est élevée, plus la zone de recouvrement est large et le
+#'   blending efficace (mais l'inférence est plus lente car plus de patches).
+#'   Valeur recommandée : 64 (overlap = 128 px).
 #' @param model_config Liste avec encoder, decoder, in_channels, n_out
 #'   (NULL = config par défaut ResNet34 + UNet)
 #' @return SpatRaster 1 bande (landcover)
 run_inference <- function(rgbi, model_path, buffer_px = 0, model_config = NULL) {
   message("\n=== Inférence FLAIR-HUB ===")
 
-  # Overlap suffisant pour que les centres se joignent après trimming
-  effective_overlap <- if (buffer_px > 0) max(32, 2 * buffer_px) else 32
-  if (buffer_px > 0) {
-    message(sprintf("Buffer: %d px par bord, overlap ajusté à %d px",
-                     buffer_px, effective_overlap))
-  }
+  # Overlap : au moins 64 px, ou 2× buffer_px pour un bon recouvrement
+  effective_overlap <- max(64, if (buffer_px > 0) 2 * buffer_px else 64)
+  message(sprintf("  Overlap: %d px, blending par fenêtre de Hann", effective_overlap))
 
   patches <- make_inference_patches(rgbi, overlap = effective_overlap)
+  n_total <- length(patches)
 
-  # Emprise du raster original (pour détecter les bords)
-  orig_ext <- ext(rgbi)
-  pixel_res <- res(rgbi)[1]
-  buffer_m <- buffer_px * pixel_res
-  tol <- pixel_res * 0.5
+  # Cas trivial : un seul patch, pas de blending nécessaire
+  if (n_total == 1) {
+    message(sprintf("  Patch 1/1: %s", names(patches)[1]))
+    result <- predict_patch(patches[[1]], model_path, model_config = model_config)
+    if (is.null(result)) stop("Échec de l'inférence sur le seul patch.")
+    names(result) <- "landcover"
+    return(result)
+  }
 
-  predictions <- list()
+  # --- Blending par fenêtre de Hann (cosinus 2D) ---
+  # Principe : chaque pixel reçoit un poids = produit de deux cosinus
+  # (un par axe), maximal au centre du patch (~1.0) et quasi-nul aux
+  # bords (~0.0). Pour chaque pixel couvert par plusieurs patches,
+  # on conserve la prédiction du patch avec le poids le plus élevé.
+  # Résultat : les prédictions fiables (centre) l'emportent toujours
+  # sur les artefacts de bord → mosaïque sans couture.
+
+  out_ext  <- ext(rgbi)
+  out_res  <- res(rgbi)[1]
+  n_rows   <- nrow(rgbi)
+  n_cols   <- ncol(rgbi)
+
+  # Matrices de travail (plus rapide que les accès cellule par cellule)
+  class_mat  <- matrix(0L, nrow = n_rows, ncol = n_cols)
+  weight_mat <- matrix(0,  nrow = n_rows, ncol = n_cols)
+
+  n_ok <- 0
   for (i in seq_along(patches)) {
     patch_name <- names(patches)[i]
-    message(sprintf("  Patch %d/%d: %s", i, length(patches), patch_name))
+    message(sprintf("  Patch %d/%d: %s", i, n_total, patch_name))
+
     pred <- predict_patch(patches[[i]], model_path, model_config = model_config)
-    if (!is.null(pred)) {
-      # Rogner les bords intérieurs du patch (pas les bords du raster)
-      if (buffer_px > 0) {
-        pe <- ext(pred)
-        # Ne rogner que les côtés qui ne touchent pas le bord du raster
-        trim_xmin <- if (pe[1] > orig_ext[1] + tol) pe[1] + buffer_m else pe[1]
-        trim_xmax <- if (pe[2] < orig_ext[2] - tol) pe[2] - buffer_m else pe[2]
-        trim_ymin <- if (pe[3] > orig_ext[3] + tol) pe[3] + buffer_m else pe[3]
-        trim_ymax <- if (pe[4] < orig_ext[4] - tol) pe[4] - buffer_m else pe[4]
-        pred <- crop(pred, ext(trim_xmin, trim_xmax, trim_ymin, trim_ymax))
-      }
-      predictions[[patch_name]] <- pred
+    if (is.null(pred)) next
+    n_ok <- n_ok + 1
+
+    nr <- nrow(pred)
+    nc <- ncol(pred)
+
+    # Fenêtre de Hann 2D : poids(r,c) = wy[r] * wx[c]
+    wy <- 0.5 - 0.5 * cos(2 * pi * seq(0.5, nr - 0.5) / nr)
+    wx <- 0.5 - 0.5 * cos(2 * pi * seq(0.5, nc - 0.5) / nc)
+    w_mat <- outer(wy, wx)
+
+    # Prédictions sous forme de matrice (lignes = rangées de pixels)
+    pred_vec <- values(pred)[, 1]
+    pred_mat <- matrix(pred_vec, nrow = nr, ncol = nc, byrow = TRUE)
+
+    # Offsets (0-based) dans le raster de sortie
+    pe <- ext(pred)
+    col_off <- round((pe[1] - out_ext[1]) / out_res)
+    row_off <- round((out_ext[4] - pe[4]) / out_res)
+
+    # Indices 1-based dans les matrices de sortie
+    r1 <- row_off + 1L;  r2 <- row_off + nr
+    c1 <- col_off + 1L;  c2 <- col_off + nc
+
+    # Sécurité : borner aux dimensions de sortie
+    pr1 <- 1L; pr2 <- nr; pc1 <- 1L; pc2 <- nc
+    if (r1 < 1L)      { pr1 <- 2L - r1;  r1 <- 1L }
+    if (r2 > n_rows)   { pr2 <- nr - (r2 - n_rows);  r2 <- n_rows }
+    if (c1 < 1L)      { pc1 <- 2L - c1;  c1 <- 1L }
+    if (c2 > n_cols)   { pc2 <- nc - (c2 - n_cols);  c2 <- n_cols }
+
+    # Sous-matrices du patch alignées sur la zone de sortie
+    w_sub    <- w_mat[pr1:pr2, pc1:pc2]
+    pred_sub <- pred_mat[pr1:pr2, pc1:pc2]
+
+    # Mettre à jour là où le nouveau poids dépasse le poids courant
+    current_w <- weight_mat[r1:r2, c1:c2]
+    better <- w_sub > current_w
+
+    if (any(better)) {
+      class_mat[r1:r2, c1:c2][better]  <- pred_sub[better]
+      weight_mat[r1:r2, c1:c2][better] <- w_sub[better]
     }
   }
 
-  if (length(predictions) == 0) {
-    stop("Aucune prédiction réussie.")
-  }
+  if (n_ok == 0) stop("Aucune prédiction réussie.")
 
-  if (length(predictions) == 1) {
-    result <- predictions[[1]]
-  } else {
-    message("Mosaïquage des prédictions...")
-    result <- do.call(merge, unname(predictions))
-  }
+  message(sprintf("  Blending terminé (%d patches fusionnés)", n_ok))
 
+  # Convertir la matrice en SpatRaster (row-major → vecteur via t())
+  result <- rast(rgbi[[1]])
+  values(result) <- as.integer(as.vector(t(class_mat)))
   names(result) <- "landcover"
   return(result)
 }
@@ -1193,11 +1241,11 @@ run_inference <- function(rgbi, model_path, buffer_px = 0, model_config = NULL) 
 #' @param dem_res_m Résolution du MNT (1 = RGE ALTI 1m)
 #' @param millesime_ortho NULL (mosaïque la plus récente) ou entier (ex: 2024)
 #' @param millesime_irc NULL (mosaïque la plus récente) ou entier (ex: 2024)
-#' @param buffer_px Buffer en pixels retiré de chaque bord des patches après
-#'   prédiction (défaut: BUFFER_PX). Seule la partie centrale de chaque patch
-#'   est conservée, ce qui élimine les artefacts de bord du réseau de neurones.
-#'   L'overlap entre patches est automatiquement ajusté (= 2 × buffer_px).
-#'   Mettre à 0 pour désactiver.
+#' @param buffer_px Contrôle l'overlap entre patches pour le blending
+#'   (défaut: BUFFER_PX). overlap = max(64, 2 × buffer_px). Le mosaïquage
+#'   utilise une fenêtre de Hann 2D : chaque pixel reçoit la prédiction du
+#'   patch dont le centre est le plus proche, éliminant les artefacts de bord.
+#'   Valeur recommandée : 64 (overlap = 128 px).
 #' @return Liste avec tous les résultats
 pipeline_aoi_to_landcover <- function(aoi_path,
                                         output_dir = file.path(getwd(), "outputs"),
