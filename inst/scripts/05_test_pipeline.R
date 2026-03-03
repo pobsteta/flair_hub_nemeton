@@ -88,15 +88,21 @@ for (model_name in models_to_test) {
   message(sprintf("  Architecture : %s(%s), %d canaux → %d classes",
                    config$decoder, config$encoder,
                    config$in_channels, config$n_classes))
+  message(sprintf("  Élévation (DEM) : %s",
+                   if (config$in_channels >= 5) "OUI (5ème bande)" else "non"))
   message(sprintf("================================================================\n"))
 
   t0 <- Sys.time()
+
+  # use_dem = TRUE uniquement pour les modèles avec élévation (rgbie, 5 canaux)
+  needs_dem <- config$in_channels >= 5
 
   result <- tryCatch({
     pipeline_aoi_to_landcover(
       aoi_path   = aoi_path,
       output_dir = output_dir,
       model_name = model_name,
+      use_dem    = needs_dem,
       buffer_px  = BUFFER_PX
     )
   }, error = function(e) {
