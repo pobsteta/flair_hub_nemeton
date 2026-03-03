@@ -1539,7 +1539,9 @@ pipeline_aoi_to_landcover <- function(aoi_path,
     inference_input = inference_input,
     ndvi            = ndvi,
     landcover       = landcover,
-    output_dir      = output_dir
+    output_dir      = output_dir,
+    model_name      = model_name,
+    config_label    = config_label
   )
   if (!is.null(dem_data)) result$dem <- dem_data$dem
 
@@ -1683,7 +1685,7 @@ plot_results <- function(result) {
                       na.value = "transparent", name = "Classe",
                       drop = TRUE) +
     guides(fill = guide_legend(override.aes = list(colour = NA))) +
-    ggtitle("Occupation du sol FLAIR-HUB") +
+    ggtitle(paste0("Occupation du sol - ", result$model_name %||% "FLAIR-HUB")) +
     theme_void() +
     theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 11),
           legend.position = "right",
@@ -1691,13 +1693,19 @@ plot_results <- function(result) {
           legend.key = element_rect(colour = NA))
 
   # --- Assemblage patchwork ---
+  ann_title <- paste0("FLAIR-HUB : ", result$model_name %||% "Résultats du pipeline")
+  ann_subtitle <- paste0(
+    "Occupation du sol par segmentation sémantique (IGN)",
+    if (!is.null(result$config_label)) paste0(" - ", result$config_label) else ""
+  )
+
   if (!is.null(p_dtm)) {
     # Layout 2x3 (avec DEM)
     combined <- (p_rvb | p_irc | p_ndvi) /
                 (p_dtm | p_chm | p_lc) +
       plot_annotation(
-        title    = "FLAIR-HUB : Résultats du pipeline",
-        subtitle = "Occupation du sol par segmentation sémantique (IGN)",
+        title    = ann_title,
+        subtitle = ann_subtitle,
         theme    = theme(
           plot.title    = element_text(hjust = 0.5, face = "bold", size = 14),
           plot.subtitle = element_text(hjust = 0.5, size = 10, colour = "grey40")
@@ -1708,8 +1716,8 @@ plot_results <- function(result) {
     combined <- (p_rvb | p_irc) /
                 (p_ndvi | p_lc) +
       plot_annotation(
-        title    = "FLAIR-HUB : Résultats du pipeline",
-        subtitle = "Occupation du sol par segmentation sémantique (IGN)",
+        title    = ann_title,
+        subtitle = ann_subtitle,
         theme    = theme(
           plot.title    = element_text(hjust = 0.5, face = "bold", size = 14),
           plot.subtitle = element_text(hjust = 0.5, size = 10, colour = "grey40")
