@@ -92,7 +92,7 @@ if (length(args) >= 2) {
   }
 } else {
   # Par défaut : modèle RGBI 15 classes
-  models_to_test <- "FLAIR-INC_rgbi_15cl_resnet34-unet"
+  models_to_test <- "FLAIR-INC_rgbie_15cl_resnet34-unet"
 }
 
 # --- Répertoire de sortie ---

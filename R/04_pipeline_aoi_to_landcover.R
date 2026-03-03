@@ -734,7 +734,7 @@ find_checkpoint_name <- function(hf_repo) {
 #'
 #' @param model_name Nom du modèle (voir FLAIR_MODELS pour la liste)
 #' @return Chemin local du modèle (fichier ou répertoire)
-download_model <- function(model_name = "FLAIR-INC_rgbi_15cl_resnet34-unet") {
+download_model <- function(model_name = "FLAIR-INC_rgbie_15cl_resnet34-unet") {
   config <- FLAIR_MODELS[[model_name]]
   hf_repo <- if (!is.null(config)) config$hf_repo else paste0("IGNF/", model_name)
 
@@ -1249,10 +1249,10 @@ run_inference <- function(rgbi, model_path, buffer_px = 0, model_config = NULL) 
 #' @return Liste avec tous les résultats
 pipeline_aoi_to_landcover <- function(aoi_path,
                                         output_dir = file.path(getwd(), "outputs"),
-                                        model_name = "FLAIR-INC_rgbi_15cl_resnet34-unet",
+                                        model_name = "FLAIR-INC_rgbie_15cl_resnet34-unet",
                                         model_path = NULL,
                                         res_m = RES_IGN,
-                                        use_dem = FALSE,
+                                        use_dem = TRUE,
                                         dem_res_m = 1,
                                         millesime_ortho = MILLESIME_ORTHO,
                                         millesime_irc = MILLESIME_IRC,
@@ -1650,16 +1650,16 @@ if (sys.nframe() == 0) {
     message("\nUtilisation:")
     message('  source("R/04_pipeline_aoi_to_landcover.R")')
     message("")
-    message('  # Modèle par défaut (RGBI, 15 classes, ResNet34+UNet)')
+    message('  # Modèle par défaut (RGBI+Élévation, 15 classes, ResNet34+UNet)')
     message('  result <- pipeline_aoi_to_landcover("data/aoi.gpkg")')
     message("")
-    message('  # Modèle RGB 15 classes')
+    message('  # Modèle RGBI seul (sans MNT)')
     message('  result <- pipeline_aoi_to_landcover("data/aoi.gpkg",')
-    message('    model_name = "FLAIR-INC_rgb_15cl_resnet34-unet")')
+    message('    model_name = "FLAIR-INC_rgbi_15cl_resnet34-unet", use_dem = FALSE)')
     message("")
-    message('  # Config LC-B : RGBI + MNT (65.1% mIoU, +1pt)')
+    message('  # Modèle RGB 15 classes (sans IRC ni MNT)')
     message('  result <- pipeline_aoi_to_landcover("data/aoi.gpkg",')
-    message('    use_dem = TRUE, dem_res_m = 1)')
+    message('    model_name = "FLAIR-INC_rgb_15cl_resnet34-unet", use_dem = FALSE)')
     message("")
     message('  # Avec un modèle local :')
     message('  result <- pipeline_aoi_to_landcover("data/aoi.gpkg",')

@@ -130,7 +130,7 @@ setup_conda_env <- function(envname = CONDA_ENV) {
 #' @param model_name Nom du modèle (ex: "FLAIR-INC_rgbi_15cl_resnet34-unet")
 #' @param hf_repo Identifiant du dépôt HF (optionnel, déduit du nom)
 #' @return Chemin local du modèle
-download_pretrained_model <- function(model_name = "FLAIR-INC_rgbi_15cl_resnet34-unet",
+download_pretrained_model <- function(model_name = "FLAIR-INC_rgbie_15cl_resnet34-unet",
                                        hf_repo = NULL) {
   library(reticulate)
   hf_hub <- import("huggingface_hub")
