@@ -709,6 +709,11 @@ download_model <- function(model_name = "FLAIR-INC_rgbi_15cl_resnet34-unet") {
 }
 
 #' Découper en patches pour l'inférence
+#'
+#' Garantit que tous les patches font exactement patch_size × patch_size pixels.
+#' Le dernier patch de chaque axe est calé contre le bord du raster (avec un
+#' overlap supplémentaire si nécessaire) plutôt que d'être tronqué, ce qui
+#' évite les prédictions aberrantes causées par un padding excessif.
 make_inference_patches <- function(r, patch_size = PATCH_SIZE, overlap = 32) {
   pixel_res <- res(r)[1]
   patch_size_m <- patch_size * pixel_res
@@ -716,11 +721,31 @@ make_inference_patches <- function(r, patch_size = PATCH_SIZE, overlap = 32) {
   step_m <- patch_size_m - overlap_m
 
   e <- ext(r)
+  raster_w <- e[2] - e[1]
+  raster_h <- e[4] - e[3]
+
+  # Grille régulière
   x_starts <- seq(e[1], e[2] - patch_size_m + step_m, by = step_m)
   y_starts <- seq(e[3], e[4] - patch_size_m + step_m, by = step_m)
 
   if (length(x_starts) == 0) x_starts <- e[1]
   if (length(y_starts) == 0) y_starts <- e[3]
+
+  # Garantir un dernier patch plein (512×512) calé contre le bord du raster.
+  # Sans cela, le dernier patch peut être très petit (ex: 50 px de large)
+  # et le padding reflect produit des prédictions aberrantes.
+  if (raster_w > patch_size_m) {
+    x_last <- e[2] - patch_size_m
+    if (abs(tail(x_starts, 1) - x_last) > pixel_res * 0.5) {
+      x_starts <- c(x_starts, x_last)
+    }
+  }
+  if (raster_h > patch_size_m) {
+    y_last <- e[4] - patch_size_m
+    if (abs(tail(y_starts, 1) - y_last) > pixel_res * 0.5) {
+      y_starts <- c(y_starts, y_last)
+    }
+  }
 
   patches <- list()
   for (x0 in x_starts) {
