@@ -723,6 +723,12 @@ find_checkpoint_name <- function(hf_repo) {
   files <- info$siblings$rfilename
   ckpt_files <- files[grepl("\\.(ckpt|pth|pt|bin|safetensors)$", files)]
   if (length(ckpt_files) == 0) return(NULL)
+  # Prioriser : .ckpt > .pth > .pt > .bin > .safetensors
+  ext_priority <- c("\\.ckpt$", "\\.pth$", "\\.pt$", "\\.bin$", "\\.safetensors$")
+  for (pat in ext_priority) {
+    matches <- ckpt_files[grepl(pat, ckpt_files)]
+    if (length(matches) > 0) return(matches[1])
+  }
   return(ckpt_files[1])
 }
 
@@ -875,10 +881,19 @@ print(f"Patch: {num_bands} bandes, {H}x{W} px")
 model_dir = "__MODEL_PATH__"
 ckpt_path = None
 if os.path.isdir(model_dir):
-    for f in sorted(os.listdir(model_dir)):
-        if f.endswith((".ckpt", ".pth", ".pt", ".bin")):
-            ckpt_path = os.path.join(model_dir, f)
-            break
+    # Scan avec priorité : .ckpt > .pth > .pt > .bin > .safetensors
+    ckpt_exts = [".ckpt", ".pth", ".pt", ".bin", ".safetensors"]
+    candidates = []
+    for f in os.listdir(model_dir):
+        for i, ext in enumerate(ckpt_exts):
+            if f.endswith(ext):
+                candidates.append((i, f))
+                break
+    if candidates:
+        candidates.sort()
+        ckpt_path = os.path.join(model_dir, candidates[0][1])
+        if len(candidates) > 1:
+            print(f"  Fichiers trouvés: {[c[1] for c in candidates]}, choisi: {candidates[0][1]}")
 elif os.path.isfile(model_dir):
     ckpt_path = model_dir
 
@@ -906,18 +921,36 @@ if ckpt_path is not None:
     # 4. Charger les poids depuis le checkpoint
     # ==================================================================
     try:
-        checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-
-        # Extraire le state_dict (format Lightning ou plain)
-        if isinstance(checkpoint, dict):
-            if "state_dict" in checkpoint:
-                state_dict = checkpoint["state_dict"]
-            elif "model_state_dict" in checkpoint:
-                state_dict = checkpoint["model_state_dict"]
-            else:
-                state_dict = checkpoint
+        # Charger le checkpoint (safetensors ou PyTorch)
+        if ckpt_path.endswith(".safetensors"):
+            try:
+                from safetensors.torch import load_file
+                state_dict = load_file(ckpt_path)
+                print(f"  Format safetensors: {len(state_dict)} clés")
+            except ImportError:
+                raise RuntimeError(
+                    "Modèle au format safetensors mais package non installé. "
+                    "Installez-le: pip install safetensors")
         else:
-            state_dict = checkpoint.state_dict() if hasattr(checkpoint, "state_dict") else {}
+            checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+            ckpt_type = type(checkpoint).__name__
+            if isinstance(checkpoint, dict):
+                print(f"  Format checkpoint: dict, clés top-level: {list(checkpoint.keys())[:8]}")
+            else:
+                print(f"  Format checkpoint: {ckpt_type}")
+
+            # Extraire le state_dict (format Lightning ou plain)
+            if isinstance(checkpoint, dict):
+                if "state_dict" in checkpoint:
+                    state_dict = checkpoint["state_dict"]
+                elif "model_state_dict" in checkpoint:
+                    state_dict = checkpoint["model_state_dict"]
+                else:
+                    state_dict = checkpoint
+            else:
+                state_dict = checkpoint.state_dict() if hasattr(checkpoint, "state_dict") else {}
+
+        print(f"  State dict: {len(state_dict)} clés, premières: {list(state_dict.keys())[:5]}")
 
         # Auto-détection du préfixe des clés du checkpoint
         # Le checkpoint peut utiliser divers préfixes selon le framework
@@ -975,8 +1008,12 @@ if ckpt_path is not None:
             print(f"Modèle chargé avec succès ({arch_label})")
 
     except Exception as e:
-        print(f"Erreur chargement modèle: {e}")
+        print("=" * 60)
+        print(f"ERREUR chargement modèle: {type(e).__name__}: {e}")
+        print("=" * 60)
         model_loaded = False
+else:
+    print("ERREUR: aucun fichier de poids trouvé dans: " + model_dir)
 
 # ======================================================================
 # 5. Inférence ou fallback
@@ -984,8 +1021,8 @@ if ckpt_path is not None:
 if model_loaded:
     # Normalisation FLAIR (centre-réduit, statistiques TRAIN+VAL)
     #   Bandes : R, G, B, NIR, (Elevation)
-    norm_means = np.array([105.08, 110.87, 101.82, 106.38, 0.0], dtype=np.float32)
-    norm_stds  = np.array([52.17, 45.38, 44.0, 39.69, 1.0], dtype=np.float32)
+    norm_means = np.array([105.08, 110.87, 101.82, 106.38, 53.26], dtype=np.float32)
+    norm_stds  = np.array([52.17, 45.38, 44.0, 39.69, 79.3], dtype=np.float32)
 
     img = image[:in_ch]
     for c in range(img.shape[0]):
@@ -1051,7 +1088,11 @@ if model_loaded:
 
 else:
     # Fallback : classification spectrale simplifiée
-    print("FALLBACK: modèle non chargé, classification spectrale")
+    print("=" * 60)
+    print("ATTENTION: FALLBACK actif - modèle NON charge !")
+    print("Les résultats seront une classification NDVI approximative,")
+    print("PAS une prédiction du réseau de neurones.")
+    print("=" * 60)
     if num_bands >= 4:
         r, g, b, nir = image[0], image[1], image[2], image[3]
         ndvi = (nir - r) / (nir + r + 1e-6)
