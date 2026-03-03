@@ -291,6 +291,7 @@ if (length(results) > 0) {
   message("#    - ortho_rvb.tif, ortho_irc.tif, ortho_rgbi.tif")
   message("#    - landcover_predicted.tif")
   message("#    - ndvi.tif")
-  message("#    - resultats_aoi_flair_hub.pdf")
+  message("#    - resultats_<model_name>.pdf (base R)")
+  message("#    - resultats_<model_name>_ggplot.pdf (patchwork)")
 }
 message("################################################################")

@@ -1414,9 +1414,9 @@ pipeline_aoi_to_landcover <- function(aoi_path,
   pdf(pdf_path, width = pdf_w, height = 12)
 
   if (n_panels > 4) {
-    par(mfrow = c(2, 3), mar = c(2, 2, 3, 4))
+    par(mfrow = c(2, 3), mar = c(2, 2, 3, 4), oma = c(0, 0, 3, 0))
   } else {
-    par(mfrow = c(2, 2), mar = c(2, 2, 3, 4))
+    par(mfrow = c(2, 2), mar = c(2, 2, 3, 4), oma = c(0, 0, 3, 0))
   }
 
   # RVB
@@ -1506,6 +1506,10 @@ pipeline_aoi_to_landcover <- function(aoi_path,
        col = lc_colors, type = "classes",
        plg = list(legend = lc_labels, cex = 0.6, border = NA))
 
+  # Titre global du PDF avec le nom du modèle
+  mtext(paste0("FLAIR-HUB : ", model_name, "  —  ", config_label),
+        outer = TRUE, cex = 1.4, font = 2, line = 1)
+
   dev.off()
   message("PDF:               ", pdf_path)
 
@@ -1545,12 +1549,19 @@ pipeline_aoi_to_landcover <- function(aoi_path,
   )
   if (!is.null(dem_data)) result$dem <- dem_data$dem
 
-  # --- Affichage interactif RStudio (patchwork) ---
+  # --- Export patchwork en PDF (ggplot2) ---
   tryCatch({
     p <- plot_results(result)
-    if (!is.null(p)) print(p)
+    if (!is.null(p)) {
+      gg_pdf <- file.path(output_dir, paste0("resultats_", model_name, "_ggplot.pdf"))
+      gg_w <- if (!is.null(dem_data)) 18 else 14
+      ggplot2::ggsave(gg_pdf, plot = p, width = gg_w, height = 10, device = "pdf")
+      message("PDF (ggplot):      ", gg_pdf)
+      # Affichage interactif RStudio
+      print(p)
+    }
   }, error = function(e) {
-    message("Affichage patchwork ignoré (packages manquants ?): ", e$message)
+    message("Export patchwork ignoré (packages manquants ?): ", e$message)
   })
 
   return(result)
