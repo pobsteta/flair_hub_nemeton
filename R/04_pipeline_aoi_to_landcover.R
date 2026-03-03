@@ -1352,12 +1352,38 @@ pipeline_aoi_to_landcover <- function(aoi_path,
   # Récupérer la config architecture du modèle
   model_config <- FLAIR_MODELS[[model_name]]
 
+  # --- Combiner RGBI + Élévation si le modèle le requiert (RGBIE, 5 canaux) ---
+  inference_input <- rgbi  # par défaut : 4 bandes RGBI
+
+  if (!is.null(model_config) && model_config$in_channels >= 5) {
+    if (!is.null(dem_data)) {
+      # Le 5ème canal FLAIR-INC est le DSM (Digital Surface Model)
+      # Le DEM est déjà rééchantillonné à 0.2m et aligné sur la grille RGBI
+      elev <- dem_data$dem[["DSM"]]
+      names(elev) <- "Elevation"
+      inference_input <- c(rgbi, elev)
+      names(inference_input) <- c("Rouge", "Vert", "Bleu", "PIR", "Elevation")
+
+      rgbie_path <- file.path(output_dir, "ortho_rgbie.tif")
+      writeRaster(inference_input, rgbie_path, overwrite = TRUE)
+
+      message(sprintf("  Image RGBIE: %d x %d px, %d bandes (RGBI + Élévation DSM)",
+                       ncol(inference_input), nrow(inference_input),
+                       nlyr(inference_input)))
+    } else {
+      warning("Le modèle ", model_name, " attend ", model_config$in_channels,
+              " canaux (RGBIE) mais le MNT n'est pas disponible.\n",
+              "  Inférence avec 4 canaux (RGBI) seulement.\n",
+              "  Activez use_dem = TRUE pour de meilleurs résultats.")
+    }
+  }
+
   # --- Étape 4/5 : Inférence ---
   step_inf <- if (use_dem) 5 else 4
   message(sprintf("\n>>> ÉTAPE %d/%d : Inférence du modèle %s",
                    step_inf, n_steps, model_name))
 
-  landcover <- run_inference(rgbi, model_path, buffer_px = buffer_px,
+  landcover <- run_inference(inference_input, model_path, buffer_px = buffer_px,
                              model_config = model_config)
 
   # --- Étape 5/6 : Export ---
@@ -1494,6 +1520,7 @@ pipeline_aoi_to_landcover <- function(aoi_path,
     ortho_rvb       = ortho$rvb,
     ortho_irc       = ortho$irc,
     ortho_rgbi      = rgbi,
+    inference_input = inference_input,
     ndvi            = ndvi,
     landcover       = landcover,
     output_dir      = output_dir
