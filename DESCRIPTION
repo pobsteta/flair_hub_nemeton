@@ -30,7 +30,8 @@ Suggests:
     rmarkdown,
     ggplot2,
     tidyterra,
-    patchwork
+    patchwork,
+    hfhub
 VignetteBuilder: knitr
 URL: https://github.com/pobsteta/flair_hub_nemeton
 BugReports: https://github.com/pobsteta/flair_hub_nemeton/issues
