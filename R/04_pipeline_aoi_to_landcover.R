@@ -1284,10 +1284,11 @@ run_inference <- function(rgbi, model_path, buffer_px = 0, model_config = NULL) 
     pred_sub <- pred_mat[pr1:pr2, pc1:pc2]
 
     # Accumuler les votes pondérés par classe (vectorisé)
-    # Calculer les indices linéaires (column-major) dans le raster de sortie
+    # Indices linéaires row-major (= ordre des cellules terra) :
+    # cell_index = (row - 1) * n_cols + col
     out_rows <- r1:r2
     out_cols <- c1:c2
-    idx_mat <- outer(out_rows, (out_cols - 1L) * n_rows, "+")  # (rows, cols)
+    idx_mat <- outer((out_rows - 1L) * n_cols, out_cols, "+")  # (rows, cols)
 
     pred_flat <- as.integer(pred_sub)
     w_flat <- as.numeric(w_sub)
