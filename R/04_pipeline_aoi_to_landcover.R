@@ -740,6 +740,57 @@ find_checkpoint_name <- function(hf_repo) {
 #'
 #' @param model_name Nom du modèle (voir FLAIR_MODELS pour la liste)
 #' @return Chemin local du modèle (fichier ou répertoire)
+#' Résoudre les symlinks/junctions HuggingFace sur Windows
+#'
+#' Sur Windows sans Developer Mode, le cache HF utilise des junctions NTFS
+#' dans snapshots/ qui provoquent NotADirectoryError en Python.
+#' Cette fonction trouve le vrai fichier blob correspondant.
+#'
+#' @param path Chemin retourné par hfhub::hub_download()
+#' @return Chemin résolu vers le blob réel
+resolve_hf_symlink <- function(path) {
+  if (!grepl("snapshots", path) || !file.exists(path)) return(path)
+
+  # 1. Sys.readlink()
+  real <- tryCatch(Sys.readlink(path), error = function(e) "")
+  if (nchar(real) > 0 && file.exists(real)) {
+    message("  Symlink résolu: ", basename(path), " -> ", basename(real))
+    return(normalizePath(real, mustWork = FALSE))
+  }
+
+  # 2. Pointer file (HF stocke le hash du blob dans un petit fichier texte)
+  sz <- file.info(path)$size
+  if (!is.na(sz) && sz < 1000) {
+    content <- tryCatch(readLines(path, n = 1, warn = FALSE), error = function(e) "")
+    if (length(content) > 0 && nchar(content[1]) > 10) {
+      blob_path <- file.path(dirname(dirname(dirname(path))),
+                             "blobs", trimws(content[1]))
+      if (file.exists(blob_path)) {
+        message("  Pointer file résolu -> blobs/", substr(trimws(content[1]), 1, 12), "...")
+        return(normalizePath(blob_path, mustWork = FALSE))
+      }
+    }
+  }
+
+  # 3. Plus gros blob (les poids sont le plus gros fichier)
+  blobs_dir <- file.path(dirname(dirname(dirname(path))), "blobs")
+  if (dir.exists(blobs_dir)) {
+    blobs <- list.files(blobs_dir, full.names = TRUE)
+    blobs <- blobs[!grepl("\\.(lock|incomplete)$", blobs)]
+    if (length(blobs) > 0) {
+      sizes <- file.info(blobs)$size
+      biggest <- blobs[which.max(sizes)]
+      if (max(sizes, na.rm = TRUE) > 1e6) {
+        message(sprintf("  Blob résolu: %s (%.1f Mo)",
+                        basename(biggest), max(sizes) / 1e6))
+        return(normalizePath(biggest, mustWork = FALSE))
+      }
+    }
+  }
+
+  normalizePath(path, mustWork = FALSE)
+}
+
 download_model <- function(model_name = "FLAIR-INC_rgbie_15cl_resnet34-unet") {
   config <- FLAIR_MODELS[[model_name]]
   hf_repo <- if (!is.null(config)) config$hf_repo else paste0("IGNF/", model_name)
@@ -756,8 +807,10 @@ download_model <- function(model_name = "FLAIR-INC_rgbie_15cl_resnet34-unet") {
         local_path <- hfhub::hub_download(hf_repo, ckpt_name)
         # Vérifier que le fichier existe réellement sur le disque
         if (file.exists(local_path)) {
-          message("  Modèle téléchargé: ", local_path)
-          return(local_path)
+          # Résoudre les symlinks HF sur Windows (junctions → blobs/)
+          resolved <- resolve_hf_symlink(local_path)
+          message("  Modèle téléchargé: ", resolved)
+          return(resolved)
         } else {
           message("  ATTENTION: hfhub a retourné un chemin mais le fichier n'existe pas:")
           message("    ", local_path)
@@ -889,58 +942,7 @@ predict_patch <- function(patch, model_path, model_config = NULL, ...) {
 
   tmp_in_py <- gsub("\\\\", "/", tmp_in)
   tmp_out_py <- gsub("\\\\", "/", tmp_out)
-  # Résoudre les symlinks HuggingFace sur Windows.
-  # Le cache HF utilise des symlinks dans snapshots/ → blobs/.
-  # Sur Windows sans Developer Mode, ces symlinks sont des "junctions"
-  # qui provoquent NotADirectoryError [WinError 267] à l'ouverture.
-  # Solution : lire le contenu du symlink pour trouver le vrai blob.
-  model_path_resolved <- model_path
-  if (grepl("snapshots", model_path) && file.exists(model_path)) {
-    # Tenter de résoudre via Sys.readlink (R >= 4.1)
-    real_path <- tryCatch(Sys.readlink(model_path), error = function(e) "")
-    if (nchar(real_path) > 0 && file.exists(real_path)) {
-      model_path_resolved <- real_path
-      message("  Symlink résolu: ", basename(model_path), " -> ", basename(real_path))
-    } else {
-      # Fallback : le fichier snapshot HF sur Windows peut contenir le hash du blob
-      # en tant que fichier texte (pointer file)
-      sz <- file.info(model_path)$size
-      if (!is.na(sz) && sz < 1000) {
-        # Petit fichier = probablement un pointer file contenant le hash du blob
-        pointer_content <- tryCatch(readLines(model_path, n = 1, warn = FALSE),
-                                    error = function(e) "")
-        if (length(pointer_content) > 0 && nchar(pointer_content[1]) > 10) {
-          blob_hash <- trimws(pointer_content[1])
-          blob_path <- file.path(dirname(dirname(dirname(model_path))),
-                                 "blobs", blob_hash)
-          if (file.exists(blob_path)) {
-            model_path_resolved <- blob_path
-            message("  Pointer file résolu: ", basename(model_path),
-                    " -> blobs/", substr(blob_hash, 1, 12), "...")
-          }
-        }
-      }
-      if (model_path_resolved == model_path) {
-        # Dernier recours : chercher le plus gros blob
-        blobs_dir <- file.path(dirname(dirname(dirname(model_path))), "blobs")
-        if (dir.exists(blobs_dir)) {
-          blob_files <- list.files(blobs_dir, full.names = TRUE)
-          blob_files <- blob_files[!grepl("\\.(lock|incomplete)$", blob_files)]
-          if (length(blob_files) > 0) {
-            sizes <- file.info(blob_files)$size
-            biggest <- blob_files[which.max(sizes)]
-            if (max(sizes, na.rm = TRUE) > 1e6) {  # > 1 Mo = probablement les poids
-              model_path_resolved <- biggest
-              message(sprintf("  Blob le plus gros: %s (%.1f Mo)",
-                              basename(biggest), max(sizes) / 1e6))
-            }
-          }
-        }
-      }
-    }
-  }
-  model_path_resolved <- normalizePath(model_path_resolved, mustWork = FALSE)
-  model_path_py <- gsub("\\\\", "/", model_path_resolved)
+  model_path_py <- gsub("\\\\", "/", model_path)
 
   # NOTE: utiliser gsub au lieu de sprintf pour éviter la limite de 8192
   # octets de sprintf sur les longues chaînes de format
@@ -967,60 +969,24 @@ print(f"Patch: {num_bands} bandes, {H}x{W} px")
 model_dir = "__MODEL_PATH__"
 ckpt_path = None
 
-# Debug : vérifier le chemin reçu
-print(f"  model_dir: {model_dir}")
-print(f"  exists: {os.path.exists(model_dir)}, isfile: {os.path.isfile(model_dir)}, isdir: {os.path.isdir(model_dir)}, islink: {os.path.islink(model_dir)}")
-
-# Résoudre les symlinks (nécessaire sur Windows où le cache HuggingFace
-# utilise des symlinks dans snapshots/ pointant vers blobs/)
-resolved = os.path.realpath(model_dir)
-if resolved != model_dir:
-    print(f"  Résolution symlink: {os.path.basename(model_dir)} -> {os.path.basename(resolved)}")
-
-# Essayer le chemin résolu d abord, puis le chemin original
-for try_path in [resolved, model_dir]:
-    if ckpt_path is not None:
-        break
-    if os.path.isdir(try_path):
-        # Scan avec priorité : .ckpt > .pth > .pt > .bin > .safetensors
-        ckpt_exts = [".ckpt", ".pth", ".pt", ".bin", ".safetensors"]
-        candidates = []
-        for f in os.listdir(try_path):
-            for i, ext in enumerate(ckpt_exts):
-                if f.endswith(ext):
-                    candidates.append((i, f))
-                    break
-        if candidates:
-            candidates.sort()
-            ckpt_path = os.path.join(try_path, candidates[0][1])
-            if len(candidates) > 1:
-                print(f"  Fichiers trouvés: {[c[1] for c in candidates]}, choisi: {candidates[0][1]}")
-    elif os.path.isfile(try_path):
-        ckpt_path = try_path
-
-# Fallback: si le chemin pointe vers snapshots/ mais le fichier n existe pas
-# (symlink cassé sur Windows), chercher le blob correspondant dans le cache
-if ckpt_path is None and "snapshots" in model_dir:
-    cache_root = model_dir.split("snapshots")[0]
-    blobs_dir = os.path.join(cache_root, "blobs")
-    if os.path.isdir(blobs_dir):
-        print(f"  Symlink cassé, recherche dans blobs/...")
-        blob_files = [f for f in os.listdir(blobs_dir)
-                      if not f.endswith(".lock") and not f.endswith(".incomplete")]
-        # Prendre le plus gros fichier (les poids du modèle sont le plus gros blob)
-        if blob_files:
-            blob_sizes = [(os.path.getsize(os.path.join(blobs_dir, f)), f)
-                          for f in blob_files]
-            blob_sizes.sort(reverse=True)
-            biggest = blob_sizes[0]
-            # Les poids d un ResNet34-UNet font > 1 Mo
-            if biggest[0] > 1_000_000:
-                ckpt_path = os.path.join(blobs_dir, biggest[1])
-                print(f"  Blob trouvé: {biggest[1]} ({biggest[0] / 1e6:.1f} Mo)")
-            else:
-                print(f"  Aucun blob assez gros pour être un modèle (max: {biggest[0]} octets)")
-    else:
-        print(f"  Répertoire blobs/ non trouvé dans: {cache_root}")
+if os.path.isdir(model_dir):
+    # Scan avec priorité : .ckpt > .pth > .pt > .bin > .safetensors
+    ckpt_exts = [".ckpt", ".pth", ".pt", ".bin", ".safetensors"]
+    candidates = []
+    for f in os.listdir(model_dir):
+        for i, ext in enumerate(ckpt_exts):
+            if f.endswith(ext):
+                candidates.append((i, f))
+                break
+    if candidates:
+        candidates.sort()
+        ckpt_path = os.path.join(model_dir, candidates[0][1])
+        if len(candidates) > 1:
+            print(f"  Fichiers trouvés: {[c[1] for c in candidates]}, choisi: {candidates[0][1]}")
+elif os.path.isfile(model_dir):
+    ckpt_path = model_dir
+else:
+    print("ERREUR: aucun fichier de poids trouvé dans: " + model_dir)
 
 model_loaded = False
 
@@ -1267,13 +1233,6 @@ print(f"Prédit: {np.unique(pred).shape[0]} classes uniques")
     names(pred) <- "landcover"
     return(pred)
   }, error = function(e) {
-    # Afficher l'erreur complète pour le premier échec (pas seulement un warning)
-    if (!exists(".flair_first_error_shown", envir = .GlobalEnv)) {
-      message("=== ERREUR PYTHON (premier patch) ===")
-      message(e$message)
-      message("=====================================")
-      assign(".flair_first_error_shown", TRUE, envir = .GlobalEnv)
-    }
     warning("Erreur inférence: ", e$message)
     return(NULL)
   }, finally = {
