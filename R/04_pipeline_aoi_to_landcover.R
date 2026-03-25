@@ -1521,6 +1521,7 @@ pipeline_aoi_to_landcover <- function(aoi_path,
   # Carte d'occupation du sol avec palette et labels intégrés
   # (s'affiche automatiquement dans QGIS avec les bonnes couleurs)
   lc_path <- file.path(output_dir, "landcover_predicted.tif")
+  if (file.exists(lc_path)) file.remove(lc_path)
 
   # Convertir les couleurs hex en RGB pour la color table (256 entrées RGBA)
   ct <- data.frame(value = 0:255,
