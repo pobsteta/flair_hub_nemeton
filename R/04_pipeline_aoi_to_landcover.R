@@ -1638,11 +1638,6 @@ pipeline_aoi_to_landcover <- function(aoi_path,
       gg_w <- if (!is.null(dem_data)) 18 else 14
       ggplot2::ggsave(gg_pdf, plot = p, width = gg_w, height = 10, device = "pdf")
       message("PDF (ggplot):      ", gg_pdf)
-      # Affichage interactif RStudio (peut timeout sur gros rasters)
-      tryCatch(print(p), error = function(e) {
-        message("Affichage RStudio ignoré (timeout): ", e$message)
-        message("Le PDF a été sauvegardé, ouvrez-le manuellement.")
-      })
     }
   }, error = function(e) {
     message("Export patchwork ignoré: ", e$message)
