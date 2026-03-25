@@ -749,19 +749,26 @@ find_checkpoint_name <- function(hf_repo) {
 #' @param path Chemin retourné par hfhub::hub_download()
 #' @return Chemin résolu vers le blob réel
 resolve_hf_symlink <- function(path) {
-  if (!grepl("snapshots", path) || !file.exists(path)) return(path)
+  if (!grepl("snapshots", path)) return(path)
+
+  # Utiliser suppressWarnings pour éviter les avertissements sur les junctions NTFS
+  # (file.info et readLines échouent bruyamment sur les junctions Windows)
 
   # 1. Sys.readlink()
   real <- tryCatch(Sys.readlink(path), error = function(e) "")
-  if (nchar(real) > 0 && file.exists(real)) {
-    message("  Symlink résolu: ", basename(path), " -> ", basename(real))
-    return(normalizePath(real, mustWork = FALSE))
+  if (nchar(real) > 0) {
+    real_resolved <- suppressWarnings(normalizePath(real, mustWork = FALSE))
+    if (file.exists(real_resolved)) {
+      message("  Symlink résolu: ", basename(path), " -> ", basename(real_resolved))
+      return(real_resolved)
+    }
   }
 
   # 2. Pointer file (HF stocke le hash du blob dans un petit fichier texte)
-  sz <- file.info(path)$size
+  sz <- suppressWarnings(tryCatch(file.info(path)$size, error = function(e) NA))
   if (!is.na(sz) && sz < 1000) {
-    content <- tryCatch(readLines(path, n = 1, warn = FALSE), error = function(e) "")
+    content <- suppressWarnings(
+      tryCatch(readLines(path, n = 1, warn = FALSE), error = function(e) ""))
     if (length(content) > 0 && nchar(content[1]) > 10) {
       blob_path <- file.path(dirname(dirname(dirname(path))),
                              "blobs", trimws(content[1]))
@@ -929,6 +936,131 @@ make_inference_patches <- function(r, patch_size = PATCH_SIZE, overlap = 32) {
 #' @param model_config Liste avec encoder, decoder, in_channels, n_out
 #'   (NULL = config par défaut ResNet34 + UNet)
 #' @return SpatRaster 1 bande (landcover) ou NULL en cas d'erreur
+#' Charger le modèle FLAIR en mémoire Python (une seule fois)
+#'
+#' @param model_path Chemin vers le checkpoint
+#' @param model_config Liste avec encoder, decoder, in_channels, n_out
+#' @return TRUE si le modèle a été chargé, FALSE sinon
+load_flair_model <- function(model_path, model_config) {
+  library(reticulate)
+
+  model_path_py <- gsub("\\\\", "/", model_path)
+
+  py_code <- '
+import os
+import torch
+import numpy as np
+import segmentation_models_pytorch as smp
+
+# ======================================================================
+# Charger le modèle FLAIR (une seule fois)
+# ======================================================================
+model_dir = "__MODEL_PATH__"
+ckpt_path = None
+_flair_model = None
+_flair_model_loaded = False
+
+if os.path.isdir(model_dir):
+    ckpt_exts = [".ckpt", ".pth", ".pt", ".bin", ".safetensors"]
+    candidates = []
+    for f in os.listdir(model_dir):
+        for i, ext in enumerate(ckpt_exts):
+            if f.endswith(ext):
+                candidates.append((i, f))
+                break
+    if candidates:
+        candidates.sort()
+        ckpt_path = os.path.join(model_dir, candidates[0][1])
+elif os.path.isfile(model_dir):
+    ckpt_path = model_dir
+else:
+    raise FileNotFoundError(f"Aucun fichier de poids trouvé: {model_dir}")
+
+print(f"Fichier modèle: {os.path.basename(ckpt_path)}")
+
+in_ch = __IN_CHANNELS__
+n_out = __N_OUT__
+
+decoder_class = getattr(smp, "__DECODER__")
+_flair_model = decoder_class(
+    encoder_name="__ENCODER__",
+    encoder_weights=None,
+    in_channels=in_ch,
+    classes=n_out,
+)
+
+# Charger le checkpoint
+if ckpt_path.endswith(".safetensors"):
+    from safetensors.torch import load_file
+    state_dict = load_file(ckpt_path)
+else:
+    checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    if isinstance(checkpoint, dict):
+        if "state_dict" in checkpoint:
+            state_dict = checkpoint["state_dict"]
+        elif "model_state_dict" in checkpoint:
+            state_dict = checkpoint["model_state_dict"]
+        else:
+            state_dict = checkpoint
+    else:
+        state_dict = checkpoint.state_dict() if hasattr(checkpoint, "state_dict") else {}
+
+# Auto-détection du préfixe
+model_keys = set(_flair_model.state_dict().keys())
+ckpt_keys = list(state_dict.keys())
+
+candidate_prefixes = ["", "model.", "net.", "module.", "backbone.",
+                      "model.model.", "network.", "seg_model."]
+for k in ckpt_keys[:20]:
+    parts = k.split(".")
+    for i in range(1, min(4, len(parts))):
+        p = ".".join(parts[:i]) + "."
+        if p not in candidate_prefixes:
+            candidate_prefixes.append(p)
+
+best_prefix = ""
+best_match = 0
+for try_prefix in candidate_prefixes:
+    matches = sum(1 for k in ckpt_keys
+                  if k.startswith(try_prefix) and
+                  k[len(try_prefix):] in model_keys)
+    if matches > best_match:
+        best_match = matches
+        best_prefix = try_prefix
+
+print(f"  Préfixe: \'{best_prefix}\' ({best_match}/{len(model_keys)} clés)")
+
+cleaned = {}
+for k, v in state_dict.items():
+    if best_prefix and k.startswith(best_prefix):
+        cleaned[k[len(best_prefix):]] = v
+    elif not best_prefix:
+        cleaned[k] = v
+
+missing, unexpected = _flair_model.load_state_dict(cleaned, strict=False)
+n_missing = len(missing) if missing else 0
+if n_missing > len(model_keys) * 0.5:
+    raise RuntimeError(f"Trop de clés manquantes ({n_missing}/{len(model_keys)})")
+
+_flair_model.eval()
+_flair_model_loaded = True
+print(f"Modèle chargé: __DECODER__(__ENCODER__), {in_ch} bandes, {n_out} classes")
+'
+  py_code <- gsub("__MODEL_PATH__", model_path_py, py_code, fixed = TRUE)
+  py_code <- gsub("__DECODER__", model_config$decoder, py_code, fixed = TRUE)
+  py_code <- gsub("__ENCODER__", model_config$encoder, py_code, fixed = TRUE)
+  py_code <- gsub("__IN_CHANNELS__", as.character(model_config$in_channels), py_code, fixed = TRUE)
+  py_code <- gsub("__N_OUT__", as.character(model_config$n_out), py_code, fixed = TRUE)
+
+  tryCatch({
+    py_run_string(py_code)
+    return(TRUE)
+  }, error = function(e) {
+    message("ERREUR chargement modèle: ", e$message)
+    return(FALSE)
+  })
+}
+
 predict_patch <- function(patch, model_path, model_config = NULL, ...) {
   if (is.null(model_config)) {
     model_config <- list(encoder = "resnet34", decoder = "Unet",
@@ -942,176 +1074,23 @@ predict_patch <- function(patch, model_path, model_config = NULL, ...) {
 
   tmp_in_py <- gsub("\\\\", "/", tmp_in)
   tmp_out_py <- gsub("\\\\", "/", tmp_out)
-  model_path_py <- gsub("\\\\", "/", model_path)
 
-  # NOTE: utiliser gsub au lieu de sprintf pour éviter la limite de 8192
-  # octets de sprintf sur les longues chaînes de format
   py_code <- '
-import os
-import torch
 import numpy as np
+import torch
 import rasterio
-import segmentation_models_pytorch as smp
 
-# ======================================================================
-# 1. Charger l image
-# ======================================================================
+# Charger l image
 with rasterio.open("__INPUT_PATH__") as src:
-    image = src.read().astype(np.float32)  # (C, H, W)
+    image = src.read().astype(np.float32)
     profile = src.profile.copy()
 
 num_bands, H, W = image.shape
-print(f"Patch: {num_bands} bandes, {H}x{W} px")
 
-# ======================================================================
-# 2. Chercher le fichier de poids
-# ======================================================================
-model_dir = "__MODEL_PATH__"
-ckpt_path = None
-
-if os.path.isdir(model_dir):
-    # Scan avec priorité : .ckpt > .pth > .pt > .bin > .safetensors
-    ckpt_exts = [".ckpt", ".pth", ".pt", ".bin", ".safetensors"]
-    candidates = []
-    for f in os.listdir(model_dir):
-        for i, ext in enumerate(ckpt_exts):
-            if f.endswith(ext):
-                candidates.append((i, f))
-                break
-    if candidates:
-        candidates.sort()
-        ckpt_path = os.path.join(model_dir, candidates[0][1])
-        if len(candidates) > 1:
-            print(f"  Fichiers trouvés: {[c[1] for c in candidates]}, choisi: {candidates[0][1]}")
-elif os.path.isfile(model_dir):
-    ckpt_path = model_dir
-else:
-    print("ERREUR: aucun fichier de poids trouvé dans: " + model_dir)
-
-model_loaded = False
-
-if ckpt_path is not None:
-    print(f"Fichier modèle: {os.path.basename(ckpt_path)}")
-
-    # ==================================================================
-    # 3. Instancier le modèle (architecture dynamique via config R)
-    # ==================================================================
-    in_ch = min(num_bands, __IN_CHANNELS__)
-    n_out = __N_OUT__
-
-    decoder_class = getattr(smp, "__DECODER__")
-    model = decoder_class(
-        encoder_name="__ENCODER__",
-        encoder_weights=None,
-        in_channels=in_ch,
-        classes=n_out,
-    )
-    arch_label = "__DECODER__(__ENCODER__)"
-
-    # ==================================================================
-    # 4. Charger les poids depuis le checkpoint
-    # ==================================================================
-    try:
-        # Charger le checkpoint (safetensors ou PyTorch)
-        if ckpt_path.endswith(".safetensors"):
-            try:
-                from safetensors.torch import load_file
-                state_dict = load_file(ckpt_path)
-                print(f"  Format safetensors: {len(state_dict)} clés")
-            except ImportError:
-                raise RuntimeError(
-                    "Modèle au format safetensors mais package non installé. "
-                    "Installez-le: pip install safetensors")
-        else:
-            checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-            ckpt_type = type(checkpoint).__name__
-            if isinstance(checkpoint, dict):
-                print(f"  Format checkpoint: dict, clés top-level: {list(checkpoint.keys())[:8]}")
-            else:
-                print(f"  Format checkpoint: {ckpt_type}")
-
-            # Extraire le state_dict (format Lightning ou plain)
-            if isinstance(checkpoint, dict):
-                if "state_dict" in checkpoint:
-                    state_dict = checkpoint["state_dict"]
-                elif "model_state_dict" in checkpoint:
-                    state_dict = checkpoint["model_state_dict"]
-                else:
-                    state_dict = checkpoint
-            else:
-                state_dict = checkpoint.state_dict() if hasattr(checkpoint, "state_dict") else {}
-
-        print(f"  State dict: {len(state_dict)} clés, premières: {list(state_dict.keys())[:5]}")
-
-        # Auto-détection du préfixe des clés du checkpoint
-        # Le checkpoint peut utiliser divers préfixes selon le framework
-        # (Lightning, DataParallel, custom wrapper, etc.)
-        model_keys = set(model.state_dict().keys())
-        ckpt_keys = list(state_dict.keys())
-
-        # Détecter les préfixes candidats depuis les clés du checkpoint
-        candidate_prefixes = ["", "model.", "net.", "module.", "backbone.",
-                              "model.model.", "network.", "seg_model."]
-
-        # Extraire aussi les préfixes réels trouvés dans le checkpoint
-        for k in ckpt_keys[:20]:
-            parts = k.split(".")
-            for i in range(1, min(4, len(parts))):
-                p = ".".join(parts[:i]) + "."
-                if p not in candidate_prefixes:
-                    candidate_prefixes.append(p)
-
-        best_prefix = ""
-        best_match = 0
-        for try_prefix in candidate_prefixes:
-            matches = sum(1 for k in ckpt_keys
-                          if k.startswith(try_prefix) and
-                          k[len(try_prefix):] in model_keys)
-            if matches > best_match:
-                best_match = matches
-                best_prefix = try_prefix
-
-        print(f"  Préfixe détecté: \'{best_prefix}\' ({best_match}/{len(model_keys)} clés correspondent)")
-
-        # Nettoyer les clés avec le meilleur préfixe
-        cleaned = {}
-        for k, v in state_dict.items():
-            if best_prefix and k.startswith(best_prefix):
-                cleaned[k[len(best_prefix):]] = v
-            elif not best_prefix:
-                cleaned[k] = v
-
-        missing, unexpected = model.load_state_dict(cleaned, strict=False)
-        if missing:
-            print(f"  Clés manquantes: {len(missing)}")
-        if unexpected:
-            print(f"  Clés inattendues: {len(unexpected)}")
-
-        # Vérifier que suffisamment de poids ont été chargés
-        n_total = len(model_keys)
-        n_missing = len(missing) if missing else 0
-        if n_missing > n_total * 0.5:
-            print(f"  ERREUR: trop de clés manquantes ({n_missing}/{n_total}), modèle non utilisable")
-            model_loaded = False
-        else:
-            model.eval()
-            model_loaded = True
-            print(f"Modèle chargé avec succès ({arch_label})")
-
-    except Exception as e:
-        print("=" * 60)
-        print(f"ERREUR chargement modèle: {type(e).__name__}: {e}")
-        print("=" * 60)
-        model_loaded = False
-else:
-    print("ERREUR: aucun fichier de poids trouvé dans: " + model_dir)
-
-# ======================================================================
-# 5. Inférence ou fallback
-# ======================================================================
-if model_loaded:
+# Inférence avec le modèle pré-chargé
+if _flair_model_loaded:
+    in_ch = __IN_CHANNELS__
     # Normalisation FLAIR (centre-réduit, statistiques TRAIN+VAL)
-    #   Bandes : R, G, B, NIR, (Elevation)
     norm_means = np.array([105.08, 110.87, 101.82, 106.38, 53.26], dtype=np.float32)
     norm_stds  = np.array([52.17, 45.38, 44.0, 39.69, 79.3], dtype=np.float32)
 
@@ -1120,75 +1099,32 @@ if model_loaded:
         if c < len(norm_means):
             img[c] = (img[c] - norm_means[c]) / norm_stds[c]
 
-    # Padding si le patch est plus petit que 512x512
     pad_h = max(0, 512 - H)
     pad_w = max(0, 512 - W)
     if pad_h > 0 or pad_w > 0:
         img = np.pad(img, ((0, 0), (0, pad_h), (0, pad_w)), mode="reflect")
 
-    tensor = torch.from_numpy(img).unsqueeze(0)  # (1, 4, H, W)
+    tensor = torch.from_numpy(img).unsqueeze(0)
 
     with torch.no_grad():
-        logits = model(tensor)  # (1, 19, H, W)
+        logits = _flair_model(tensor)
 
-    pred_flair = logits.squeeze(0).cpu().numpy().argmax(axis=0)  # (H, W), 0-indexed
+    pred_flair = logits.squeeze(0).cpu().numpy().argmax(axis=0)
 
-    # Retirer le padding
     if pad_h > 0 or pad_w > 0:
         pred_flair = pred_flair[:H, :W]
 
-    # Remap FLAIR-1 (0-indexed argmax) → CoSIA (1-indexed)
-    #
-    # FLAIR-1 dataset labels (1-indexed in GeoTIFF, shifted to 0-indexed for model):
-    #   0=building  1=pervious  2=impervious  3=bare_soil  4=water
-    #   5=coniferous  6=deciduous  7=brushwood  8=vineyard  9=herbaceous
-    #   10=agricultural  11=plowed  12=swimming_pool  13=snow
-    #   14=clear_cut(DISABLED)  15=mixed(DISABLED)  16=ligneous(DISABLED)
-    #   17=greenhouse(ACTIVE)  18=other(DISABLED)
-    #
-    # CoSIA 15 classes (1-indexed):
-    #   1=Bâtiment 2=Serre 3=Piscine 4=Imperméable 5=Perméable
-    #   6=Sol nu 7=Eau 8=Neige 9=Herbacé 10=Agricole
-    #   11=Labouré 12=Vigne 13=Feuillu 14=Conifère 15=Lande
+    # Remap FLAIR-1 → CoSIA
     remap = np.array([
-        1,   # FLAIR 0  (building)       → CoSIA 1  (Bâtiment)
-        5,   # FLAIR 1  (pervious)       → CoSIA 5  (Perméable)
-        4,   # FLAIR 2  (impervious)     → CoSIA 4  (Imperméable)
-        6,   # FLAIR 3  (bare soil)      → CoSIA 6  (Sol nu)
-        7,   # FLAIR 4  (water)          → CoSIA 7  (Eau)
-        14,  # FLAIR 5  (coniferous)     → CoSIA 14 (Conifère)
-        13,  # FLAIR 6  (deciduous)      → CoSIA 13 (Feuillu)
-        15,  # FLAIR 7  (brushwood)      → CoSIA 15 (Lande)
-        12,  # FLAIR 8  (vineyard)       → CoSIA 12 (Vigne)
-        9,   # FLAIR 9  (herbaceous)     → CoSIA 9  (Herbacé)
-        10,  # FLAIR 10 (agricultural)   → CoSIA 10 (Agricole)
-        11,  # FLAIR 11 (plowed)         → CoSIA 11 (Labouré)
-        3,   # FLAIR 12 (swimming pool)  → CoSIA 3  (Piscine)
-        8,   # FLAIR 13 (snow)           → CoSIA 8  (Neige)
-        0,   # FLAIR 14 (clear cut)      → 0 (DISABLED)
-        0,   # FLAIR 15 (mixed)          → 0 (DISABLED)
-        0,   # FLAIR 16 (ligneous)       → 0 (DISABLED)
-        2,   # FLAIR 17 (greenhouse)     → CoSIA 2  (Serre)
-        0,   # FLAIR 18 (other)          → 0 (DISABLED)
-    ], dtype=np.int32)
-
+        1, 5, 4, 6, 7, 14, 13, 15, 12, 9, 10, 11, 3, 8,
+        0, 0, 0, 2, 0], dtype=np.int32)
     pred = remap[pred_flair]
-
-    n_unique = len(np.unique(pred[pred > 0]))
-    print(f"Inférence NN: {n_unique} classes prédites")
-
 else:
-    # Fallback : classification spectrale simplifiée
-    print("=" * 60)
-    print("ATTENTION: FALLBACK actif - modèle NON charge !")
-    print("Les résultats seront une classification NDVI approximative,")
-    print("PAS une prédiction du réseau de neurones.")
-    print("=" * 60)
+    # Fallback NDVI
     if num_bands >= 4:
         r, g, b, nir = image[0], image[1], image[2], image[3]
         ndvi = (nir - r) / (nir + r + 1e-6)
         brightness = (r + g + b) / 3.0
-
         pred = np.zeros((H, W), dtype=np.int32)
         pred[(brightness < 30) & (ndvi < 0.1)] = 7
         pred[(brightness > 150) & (ndvi < 0.1)] = 1
@@ -1198,7 +1134,7 @@ else:
         pred[(ndvi >= 0.35) & (ndvi < 0.5) & (pred == 0)] = 10
         pred[(ndvi >= 0.5) & (ndvi < 0.7) & (pred == 0)] = 13
         pred[(ndvi >= 0.7) & (pred == 0)] = 14
-        pred[pred == 0] = 15  # non classé → Lande
+        pred[pred == 0] = 15
     else:
         pred = np.full((H, W), 15, dtype=np.int32)
 
@@ -1220,12 +1156,8 @@ with rasterio.open("__OUTPUT_PATH__", "w", **out_profile) as dst:
 print(f"Prédit: {np.unique(pred).shape[0]} classes uniques")
 '
   py_code <- gsub("__INPUT_PATH__", tmp_in_py, py_code, fixed = TRUE)
-  py_code <- gsub("__MODEL_PATH__", model_path_py, py_code, fixed = TRUE)
   py_code <- gsub("__OUTPUT_PATH__", tmp_out_py, py_code, fixed = TRUE)
-  py_code <- gsub("__DECODER__", model_config$decoder, py_code, fixed = TRUE)
-  py_code <- gsub("__ENCODER__", model_config$encoder, py_code, fixed = TRUE)
   py_code <- gsub("__IN_CHANNELS__", as.character(model_config$in_channels), py_code, fixed = TRUE)
-  py_code <- gsub("__N_OUT__", as.character(model_config$n_out), py_code, fixed = TRUE)
 
   tryCatch({
     py_run_string(py_code)
@@ -1263,9 +1195,19 @@ print(f"Prédit: {np.unique(pred).shape[0]} classes uniques")
 run_inference <- function(rgbi, model_path, buffer_px = 0, model_config = NULL) {
   message("\n=== Inférence FLAIR-HUB ===")
 
+  # Charger le modèle une seule fois en mémoire Python
+  if (is.null(model_config)) {
+    model_config <- list(encoder = "resnet34", decoder = "Unet",
+                         in_channels = 4, n_out = 19, n_classes = 15)
+  }
+  model_ok <- load_flair_model(model_path, model_config)
+  if (!model_ok) {
+    stop("Impossible de charger le modèle. Vérifiez le fichier de poids.", call. = FALSE)
+  }
+
   # Overlap : au moins 64 px, ou 2× buffer_px pour un bon recouvrement
   effective_overlap <- max(64, if (buffer_px > 0) 2 * buffer_px else 64)
-  message(sprintf("  Overlap: %d px, blending par fenêtre de Hann", effective_overlap))
+  message(sprintf("  Overlap: %d px, vote pondéré par classe (Hann)", effective_overlap))
 
   patches <- make_inference_patches(rgbi, overlap = effective_overlap)
   n_total <- length(patches)
