@@ -1417,6 +1417,37 @@ pipeline_aoi_to_landcover <- function(aoi_path,
       # Le DEM est déjà rééchantillonné à 0.2m et aligné sur la grille RGBI
       elev <- dem_data$dem[["DSM"]]
       names(elev) <- "Elevation"
+
+      # Nettoyer les artefacts d'élévation (NA, 0, valeurs aberrantes)
+      # Les tuiles WMS peuvent avoir des zones sans données qui causent
+      # des artefacts rectangulaires dans la classification.
+      elev_vals <- values(elev)
+      n_na <- sum(is.na(elev_vals))
+      n_zero <- sum(elev_vals == 0, na.rm = TRUE)
+      elev_range <- range(elev_vals, na.rm = TRUE)
+
+      if (n_na > 0 || n_zero > 100) {
+        message(sprintf("  Nettoyage élévation: %d NA, %d zéros, range [%.0f, %.0f]",
+                         n_na, n_zero, elev_range[1], elev_range[2]))
+        # Remplacer les zéros isolés par NA (artefacts de tuiles WMS)
+        # (les vrais zéros d'altitude sont rares en métropole : mer/littoral)
+        elev_median <- median(elev_vals, na.rm = TRUE)
+        if (elev_median > 10) {  # Zone non littorale
+          elev[elev == 0] <- NA
+        }
+        # Combler les NA par interpolation focale (voisinage 5×5)
+        if (any(is.na(values(elev)))) {
+          elev <- focal(elev, w = 5, fun = "mean", na.policy = "only", na.rm = TRUE)
+          # Si encore des NA (grands trous), utiliser la médiane
+          remaining_na <- sum(is.na(values(elev)))
+          if (remaining_na > 0) {
+            message(sprintf("  %d NA restants comblés par la médiane (%.0f m)",
+                             remaining_na, elev_median))
+            elev[is.na(elev)] <- elev_median
+          }
+        }
+      }
+
       inference_input <- c(rgbi, elev)
       names(inference_input) <- c("Rouge", "Vert", "Bleu", "PIR", "Elevation")
 
