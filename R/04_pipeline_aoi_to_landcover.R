@@ -889,9 +889,57 @@ predict_patch <- function(patch, model_path, model_config = NULL, ...) {
 
   tmp_in_py <- gsub("\\\\", "/", tmp_in)
   tmp_out_py <- gsub("\\\\", "/", tmp_out)
-  # Résoudre les symlinks avant de passer le chemin à Python
-  # (le cache HuggingFace utilise des symlinks qui peuvent être cassés sur Windows)
-  model_path_resolved <- normalizePath(model_path, mustWork = FALSE)
+  # Résoudre les symlinks HuggingFace sur Windows.
+  # Le cache HF utilise des symlinks dans snapshots/ → blobs/.
+  # Sur Windows sans Developer Mode, ces symlinks sont des "junctions"
+  # qui provoquent NotADirectoryError [WinError 267] à l'ouverture.
+  # Solution : lire le contenu du symlink pour trouver le vrai blob.
+  model_path_resolved <- model_path
+  if (grepl("snapshots", model_path) && file.exists(model_path)) {
+    # Tenter de résoudre via Sys.readlink (R >= 4.1)
+    real_path <- tryCatch(Sys.readlink(model_path), error = function(e) "")
+    if (nchar(real_path) > 0 && file.exists(real_path)) {
+      model_path_resolved <- real_path
+      message("  Symlink résolu: ", basename(model_path), " -> ", basename(real_path))
+    } else {
+      # Fallback : le fichier snapshot HF sur Windows peut contenir le hash du blob
+      # en tant que fichier texte (pointer file)
+      sz <- file.info(model_path)$size
+      if (!is.na(sz) && sz < 1000) {
+        # Petit fichier = probablement un pointer file contenant le hash du blob
+        pointer_content <- tryCatch(readLines(model_path, n = 1, warn = FALSE),
+                                    error = function(e) "")
+        if (length(pointer_content) > 0 && nchar(pointer_content[1]) > 10) {
+          blob_hash <- trimws(pointer_content[1])
+          blob_path <- file.path(dirname(dirname(dirname(model_path))),
+                                 "blobs", blob_hash)
+          if (file.exists(blob_path)) {
+            model_path_resolved <- blob_path
+            message("  Pointer file résolu: ", basename(model_path),
+                    " -> blobs/", substr(blob_hash, 1, 12), "...")
+          }
+        }
+      }
+      if (model_path_resolved == model_path) {
+        # Dernier recours : chercher le plus gros blob
+        blobs_dir <- file.path(dirname(dirname(dirname(model_path))), "blobs")
+        if (dir.exists(blobs_dir)) {
+          blob_files <- list.files(blobs_dir, full.names = TRUE)
+          blob_files <- blob_files[!grepl("\\.(lock|incomplete)$", blob_files)]
+          if (length(blob_files) > 0) {
+            sizes <- file.info(blob_files)$size
+            biggest <- blob_files[which.max(sizes)]
+            if (max(sizes, na.rm = TRUE) > 1e6) {  # > 1 Mo = probablement les poids
+              model_path_resolved <- biggest
+              message(sprintf("  Blob le plus gros: %s (%.1f Mo)",
+                              basename(biggest), max(sizes) / 1e6))
+            }
+          }
+        }
+      }
+    }
+  }
+  model_path_resolved <- normalizePath(model_path_resolved, mustWork = FALSE)
   model_path_py <- gsub("\\\\", "/", model_path_resolved)
 
   # NOTE: utiliser gsub au lieu de sprintf pour éviter la limite de 8192
