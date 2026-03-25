@@ -754,11 +754,22 @@ download_model <- function(model_name = "FLAIR-INC_rgbie_15cl_resnet34-unet") {
       message("  Téléchargement via hfhub (R natif): ", ckpt_name)
       tryCatch({
         local_path <- hfhub::hub_download(hf_repo, ckpt_name)
-        message("  Modèle téléchargé: ", local_path)
-        return(local_path)
+        # Vérifier que le fichier existe réellement sur le disque
+        if (file.exists(local_path)) {
+          message("  Modèle téléchargé: ", local_path)
+          return(local_path)
+        } else {
+          message("  ATTENTION: hfhub a retourné un chemin mais le fichier n'existe pas:")
+          message("    ", local_path)
+          message("  Le dépôt HuggingFace est peut-être privé/gated ou le téléchargement a échoué.")
+          message("  → fallback Python")
+        }
       }, error = function(e) {
         message("  hfhub échoué: ", e$message, " → fallback Python")
       })
+    } else {
+      message("  Aucun fichier checkpoint trouvé via l'API HuggingFace pour: ", hf_repo)
+      message("  Vérifiez que le dépôt existe et contient un fichier .ckpt/.pth/.pt/.bin/.safetensors")
     }
   }
 
@@ -767,10 +778,34 @@ download_model <- function(model_name = "FLAIR-INC_rgbie_15cl_resnet34-unet") {
   hf_hub <- import("huggingface_hub")
   tryCatch({
     local_dir <- hf_hub$snapshot_download(repo_id = hf_repo, repo_type = "model")
-    message("  Modèle téléchargé: ", local_dir)
+    # Vérifier que le répertoire contient bien des fichiers de poids
+    if (dir.exists(local_dir)) {
+      ckpt_files <- list.files(local_dir,
+                               pattern = "\\.(ckpt|pth|pt|bin|safetensors)$",
+                               recursive = TRUE)
+      if (length(ckpt_files) == 0) {
+        stop("Le dépôt '", hf_repo, "' a été téléchargé mais ne contient aucun ",
+             "fichier de poids (.ckpt/.pth/.pt/.bin/.safetensors).\n",
+             "Contenu du répertoire: ",
+             paste(list.files(local_dir, recursive = TRUE), collapse = ", "),
+             call. = FALSE)
+      }
+      message("  Modèle téléchargé: ", local_dir)
+      message("  Fichiers de poids: ", paste(ckpt_files, collapse = ", "))
+    } else if (file.exists(local_dir)) {
+      message("  Modèle téléchargé (fichier): ", local_dir)
+    } else {
+      stop("Le téléchargement a retourné un chemin inexistant: ", local_dir, call. = FALSE)
+    }
     return(local_dir)
   }, error = function(e) {
-    stop("Échec du téléchargement: ", e$message, call. = FALSE)
+    stop("Échec du téléchargement du modèle '", model_name, "' depuis '", hf_repo, "'.\n",
+         "Erreur: ", e$message, "\n",
+         "Vérifiez:\n",
+         "  1. Le dépôt existe sur HuggingFace\n",
+         "  2. Vous êtes authentifié (huggingface-cli login) si le dépôt est privé/gated\n",
+         "  3. Votre connexion internet fonctionne",
+         call. = FALSE)
   })
 }
 
