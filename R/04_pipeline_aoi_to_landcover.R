@@ -1238,7 +1238,8 @@ print(f"Prédit: {np.unique(pred).shape[0]} classes uniques")
 #' @param model_config Liste avec encoder, decoder, in_channels, n_out
 #'   (NULL = config par défaut ResNet34 + UNet)
 #' @return SpatRaster 1 bande (landcover)
-run_inference <- function(rgbi, model_path, buffer_px = 0, model_config = NULL) {
+run_inference <- function(rgbi, model_path, buffer_px = 0, model_config = NULL,
+                          fallback = FALSE) {
   message("\n=== Inférence FLAIR-HUB ===")
 
   # Charger le modèle une seule fois en mémoire Python
@@ -1246,9 +1247,17 @@ run_inference <- function(rgbi, model_path, buffer_px = 0, model_config = NULL) 
     model_config <- list(encoder = "resnet34", decoder = "Unet",
                          in_channels = 4, n_out = 19, n_classes = 15)
   }
-  model_ok <- load_flair_model(model_path, model_config)
-  if (!model_ok) {
-    stop("Impossible de charger le modèle. Vérifiez le fichier de poids.", call. = FALSE)
+  if (fallback) {
+    message("  Mode FALLBACK forcé : classification NDVI",
+            if (nlyr(rgbi) >= 5) "+CHM" else "", " (pas de réseau de neurones)")
+    # Forcer _flair_model_loaded = False en Python
+    library(reticulate)
+    py_run_string("_flair_model_loaded = False")
+  } else {
+    model_ok <- load_flair_model(model_path, model_config)
+    if (!model_ok) {
+      stop("Impossible de charger le modèle. Vérifiez le fichier de poids.", call. = FALSE)
+    }
   }
 
   # Overlap : au moins 64 px, ou 2× buffer_px pour un bon recouvrement
@@ -1399,7 +1408,8 @@ pipeline_aoi_to_landcover <- function(aoi_path,
                                         dem_res_m = 1,
                                         millesime_ortho = MILLESIME_ORTHO,
                                         millesime_irc = MILLESIME_IRC,
-                                        buffer_px = BUFFER_PX) {
+                                        buffer_px = BUFFER_PX,
+                                        fallback = FALSE) {
   dir_create(output_dir)
   t0 <- Sys.time()
 
@@ -1502,7 +1512,7 @@ pipeline_aoi_to_landcover <- function(aoi_path,
                    step_inf, n_steps, model_name))
 
   landcover <- run_inference(inference_input, model_path, buffer_px = buffer_px,
-                             model_config = model_config)
+                             model_config = model_config, fallback = fallback)
 
   # --- Étape 5/6 : Export ---
   step_exp <- if (use_dem) 6 else 5
