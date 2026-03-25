@@ -1679,7 +1679,7 @@ pipeline_aoi_to_landcover <- function(aoi_path,
 
   # --- Export patchwork en PDF (ggplot2) ---
   tryCatch({
-    p <- plot_results(result)
+    p <- plot_results(result, maxcell = 100000)
     if (!is.null(p)) {
       gg_pdf <- file.path(output_dir, paste0("resultats_", model_name, "_ggplot.pdf"))
       gg_w <- if (!is.null(dem_data)) 18 else 14
@@ -1705,7 +1705,7 @@ pipeline_aoi_to_landcover <- function(aoi_path,
 #' @param result Liste retournée par \code{pipeline_aoi_to_landcover()}
 #' @return Un objet patchwork (affiché automatiquement dans RStudio)
 #' @export
-plot_results <- function(result) {
+plot_results <- function(result, maxcell = 100000) {
 
   # --- Vérification des packages ---
   pkgs <- c("ggplot2", "tidyterra", "patchwork")
@@ -1726,7 +1726,8 @@ plot_results <- function(result) {
                 "#d9ef8b", "#91cf60", "#1a9850", "#006837")
 
   # Limiter le nombre de cellules pour éviter le timeout RStudio
-  mc <- 250000
+  # 100K = rapide, 250K = moyen, 500K+ = lent/timeout possible
+  mc <- maxcell
 
   # --- Panel 1 : Ortho RVB ---
   p_rvb <- ggplot() +
