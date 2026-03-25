@@ -601,45 +601,14 @@ download_dem_for_aoi <- function(aoi, output_dir, res_m = 1, rgbi = NULL) {
     dsm <- resample(dsm, dtm, method = "bilinear")
   }
 
-  # --- Correction des artefacts de dalles LiDAR HD dans le DSM ---
-  # Le MNS LiDAR HD est composé de dalles acquises à différentes dates.
-  # Les jointures entre dalles créent des sauts d'altitude (10-30m) avec
-  # des bords rectangulaires nets que le modèle interprète comme des bâtiments.
-  #
-  # Stratégie : utiliser le DTM (continu, sans artefact) comme base d'altitude
-  # et n'ajouter que la hauteur au-dessus du sol (CHM = DSM - DTM) lissée.
-  # Cela élimine les décalages systémiques entre dalles tout en préservant
-  # l'information de hauteur (arbres, bâtiments) pour le modèle.
+  # Calculer le CHM (hauteur au-dessus du sol = DSM - DTM)
   if (has_mns) {
-    message("Correction des artefacts de dalles DSM...")
-
-    # Hauteur au-dessus du sol = DSM - DTM
     chm <- dsm - dtm
-    chm_vals <- values(chm)
-    # Borner le CHM entre 0 et 60m (valeurs aberrantes = artefacts de dalle)
     chm[chm < 0] <- 0
-    chm[chm > 60] <- NA
-    # Combler les NA par interpolation focale
-    if (any(is.na(values(chm)))) {
-      chm <- focal(chm, w = 5, fun = "mean", na.policy = "only", na.rm = TRUE)
-      chm[is.na(chm)] <- 0
-    }
-
-    # Lisser le CHM pour éliminer les frontières nettes de dalles
-    # Un filtre moyen 11×11 (= 11m à 1m de résolution) estompe les bords
-    # rectangulaires tout en préservant les structures > 11m
-    chm_smooth <- focal(chm, w = 11, fun = "mean", na.rm = TRUE)
-
-    # Reconstruire un DSM propre : altitude terrain + hauteur lissée
-    dsm <- dtm + chm_smooth
-    names(dsm) <- "DSM"
-
-    n_capped <- sum(chm_vals > 60, na.rm = TRUE) + sum(chm_vals < 0, na.rm = TRUE)
-    message(sprintf("  CHM: range [%.1f, %.1f]m, %d valeurs aberrantes corrigées",
-                     min(values(chm_smooth), na.rm = TRUE),
-                     max(values(chm_smooth), na.rm = TRUE),
-                     n_capped))
-    message("  DSM reconstruit: DTM + CHM lissé (11m)")
+    names(chm) <- "CHM"
+    chm_vals <- values(chm, na.rm = TRUE)
+    message(sprintf("  CHM (DSM-DTM): range [%.1f, %.1f]m",
+                     min(chm_vals), max(chm_vals)))
   }
 
   # Combiner en SpatRaster 2 bandes (format FLAIR-HUB DEM_ELEV)
