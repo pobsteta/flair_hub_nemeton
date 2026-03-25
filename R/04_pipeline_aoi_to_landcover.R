@@ -72,7 +72,7 @@ WMS_MAX_PX <- 4096  # Taille max par requête WMS
 #   - 32  : overlap = 64 px  (identique à 0)
 #   - 64  : recommandé (overlap = 128 px, bon compromis qualité/vitesse)
 #   - 128 : agressif (overlap = 256 px, meilleur blending mais plus lent)
-BUFFER_PX <- 64
+BUFFER_PX <- 128
 
 # --- Registre des modèles FLAIR supportés ---
 # Chaque entrée décrit l'architecture du modèle pour l'instanciation automatique.
