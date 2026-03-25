@@ -1130,21 +1130,57 @@ if _flair_model_loaded:
         0, 0, 0, 2, 0], dtype=np.int32)
     pred = remap[pred_flair]
 else:
-    # Fallback NDVI
+    # Fallback NDVI + CHM (classification par seuillage spectral et hauteur)
     if num_bands >= 4:
         r, g, b, nir = image[0], image[1], image[2], image[3]
         ndvi = (nir - r) / (nir + r + 1e-6)
         brightness = (r + g + b) / 3.0
+        has_chm = num_bands >= 5
+        chm = image[4] if has_chm else np.zeros((H, W), dtype=np.float32)
+
         pred = np.zeros((H, W), dtype=np.int32)
-        pred[(brightness < 30) & (ndvi < 0.1)] = 7
-        pred[(brightness > 150) & (ndvi < 0.1)] = 1
-        pred[(brightness > 100) & (ndvi < 0.15) & (pred == 0)] = 4
-        pred[(ndvi < 0.2) & (pred == 0)] = 6
-        pred[(ndvi >= 0.2) & (ndvi < 0.35) & (pred == 0)] = 9
-        pred[(ndvi >= 0.35) & (ndvi < 0.5) & (pred == 0)] = 10
-        pred[(ndvi >= 0.5) & (ndvi < 0.7) & (pred == 0)] = 13
-        pred[(ndvi >= 0.7) & (pred == 0)] = 14
-        pred[pred == 0] = 15
+
+        # --- Classes avec CHM (hauteur au-dessus du sol) ---
+        if has_chm:
+            # Eau : sombre, pas de végétation, au sol
+            pred[(brightness < 30) & (ndvi < 0.1) & (chm < 1)] = 7
+            # Piscine : eau claire (bleu)
+            pred[(b > r) & (b > nir) & (ndvi < 0) & (chm < 1) & (pred == 0)] = 3
+            # Bâtiment : élevé, pas de végétation
+            pred[(chm > 3) & (ndvi < 0.15) & (pred == 0)] = 1
+            # Serre : élevé modéré, très brillant, pas de végétation
+            pred[(chm > 2) & (chm < 6) & (brightness > 140) & (ndvi < 0.2) & (pred == 0)] = 2
+            # Conifère : très haut, très vert
+            pred[(chm > 10) & (ndvi >= 0.5) & (pred == 0)] = 14
+            # Feuillu : haut, vert
+            pred[(chm > 5) & (ndvi >= 0.3) & (pred == 0)] = 13
+            # Lande/broussaille : hauteur moyenne, végétation
+            pred[(chm > 1) & (chm <= 5) & (ndvi >= 0.2) & (pred == 0)] = 15
+            # Imperméable : au sol, clair, pas de végétation
+            pred[(chm < 1) & (brightness > 100) & (ndvi < 0.15) & (pred == 0)] = 4
+            # Sol nu : au sol, peu de végétation
+            pred[(chm < 1) & (ndvi < 0.2) & (pred == 0)] = 6
+            # Herbacé : au sol, végétation faible à moyenne
+            pred[(chm < 2) & (ndvi >= 0.2) & (ndvi < 0.4) & (pred == 0)] = 9
+            # Agricole : au sol, végétation moyenne
+            pred[(chm < 2) & (ndvi >= 0.4) & (pred == 0)] = 10
+            # Reste non classé
+            pred[pred == 0] = 9  # par défaut herbacé
+        else:
+            # --- Fallback NDVI seul (sans CHM) ---
+            pred[(brightness < 30) & (ndvi < 0.1)] = 7
+            pred[(brightness > 150) & (ndvi < 0.1) & (pred == 0)] = 1
+            pred[(brightness > 100) & (ndvi < 0.15) & (pred == 0)] = 4
+            pred[(ndvi < 0.2) & (pred == 0)] = 6
+            pred[(ndvi >= 0.2) & (ndvi < 0.35) & (pred == 0)] = 9
+            pred[(ndvi >= 0.35) & (ndvi < 0.5) & (pred == 0)] = 10
+            pred[(ndvi >= 0.5) & (ndvi < 0.7) & (pred == 0)] = 13
+            pred[(ndvi >= 0.7) & (pred == 0)] = 14
+            pred[pred == 0] = 15
+
+        n_unique = len(np.unique(pred[pred > 0]))
+        mode = "NDVI+CHM" if has_chm else "NDVI seul"
+        print(f"Fallback ({mode}): {n_unique} classes")
     else:
         pred = np.full((H, W), 15, dtype=np.int32)
 
@@ -1423,27 +1459,28 @@ pipeline_aoi_to_landcover <- function(aoi_path,
 
   if (!is.null(model_config) && model_config$in_channels >= 5) {
     if (!is.null(dem_data)) {
-      # 5ème canal : utiliser le DTM (terrain nu, continu, sans artefact)
-      # plutôt que le DSM (surface, artefacts de dalles LiDAR HD).
-      # Le MNS LiDAR HD a des décalages entre dalles (10-30m) qui créent
-      # des frontières rectangulaires nettes interprétées comme des bâtiments.
-      # Le DTM (RGE ALTI) est un produit homogène sans ces artefacts.
-      elev <- dem_data$dem[["DTM"]]
-      names(elev) <- "Elevation"
+      # 5ème canal : CHM (hauteur au-dessus du sol = DSM - DTM)
+      # Plus informatif que le DTM brut pour la classification :
+      # - Arbres : CHM 5-30m, Bâtiments : CHM 3-15m, Sol : CHM ~0m
+      # - Pas d'artefact de dalle car le DTM (RGE ALTI) est continu
+      dsm <- dem_data$dem[["DSM"]]
+      dtm <- dem_data$dem[["DTM"]]
+      chm <- dsm - dtm
+      chm[chm < 0] <- 0   # Borner les valeurs négatives
+      chm[chm > 60] <- 60  # Borner les valeurs aberrantes
+      names(chm) <- "CHM"
 
-      # Nettoyer les éventuels NA/0
-      elev_vals <- values(elev)
-      n_na <- sum(is.na(elev_vals))
-      if (n_na > 0) {
-        message(sprintf("  Nettoyage élévation: %d NA", n_na))
-        elev <- focal(elev, w = 5, fun = "mean", na.policy = "only", na.rm = TRUE)
-        if (any(is.na(values(elev)))) {
-          elev[is.na(elev)] <- median(elev_vals, na.rm = TRUE)
-        }
+      # Nettoyer les éventuels NA
+      if (any(is.na(values(chm)))) {
+        chm <- focal(chm, w = 5, fun = "mean", na.policy = "only", na.rm = TRUE)
+        chm[is.na(chm)] <- 0
       }
 
-      inference_input <- c(rgbi, elev)
-      names(inference_input) <- c("Rouge", "Vert", "Bleu", "PIR", "Elevation")
+      chm_range <- range(values(chm), na.rm = TRUE)
+      message(sprintf("  CHM (DSM-DTM): range [%.1f, %.1f]m", chm_range[1], chm_range[2]))
+
+      inference_input <- c(rgbi, chm)
+      names(inference_input) <- c("Rouge", "Vert", "Bleu", "PIR", "CHM")
 
       rgbie_path <- file.path(output_dir, "ortho_rgbie.tif")
       writeRaster(inference_input, rgbie_path, overwrite = TRUE)
