@@ -919,6 +919,10 @@ print(f"Patch: {num_bands} bandes, {H}x{W} px")
 model_dir = "__MODEL_PATH__"
 ckpt_path = None
 
+# Debug : vérifier le chemin reçu
+print(f"  model_dir: {model_dir}")
+print(f"  exists: {os.path.exists(model_dir)}, isfile: {os.path.isfile(model_dir)}, isdir: {os.path.isdir(model_dir)}, islink: {os.path.islink(model_dir)}")
+
 # Résoudre les symlinks (nécessaire sur Windows où le cache HuggingFace
 # utilise des symlinks dans snapshots/ pointant vers blobs/)
 resolved = os.path.realpath(model_dir)
@@ -1215,6 +1219,13 @@ print(f"Prédit: {np.unique(pred).shape[0]} classes uniques")
     names(pred) <- "landcover"
     return(pred)
   }, error = function(e) {
+    # Afficher l'erreur complète pour le premier échec (pas seulement un warning)
+    if (!exists(".flair_first_error_shown", envir = .GlobalEnv)) {
+      message("=== ERREUR PYTHON (premier patch) ===")
+      message(e$message)
+      message("=====================================")
+      assign(".flair_first_error_shown", TRUE, envir = .GlobalEnv)
+    }
     warning("Erreur inférence: ", e$message)
     return(NULL)
   }, finally = {
