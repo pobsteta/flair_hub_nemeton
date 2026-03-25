@@ -1240,50 +1240,66 @@ print(f"Prédit: {np.unique(pred).shape[0]} classes uniques")
 #' @return SpatRaster 1 bande (landcover)
 #' Fusion hybride : zones fallback + classes NN
 #'
-#' Pour chaque zone connexe du fallback, assigne la classe NN majoritaire.
-#' Résultat : contours précis (fallback pixel-level) + classes précises (NN).
+#' Pour chaque groupe de pixels adjacents de même classe dans le fallback,
+#' assigne la classe NN majoritaire de ces mêmes pixels.
+#' Les zones sont limitées par un grillage spatial (blocs de block_size px)
+#' pour éviter qu'une seule grande zone (ex: toute la forêt) n'écrase
+#' la diversité des classes NN.
 #'
 #' @param lc_fallback SpatRaster 1 bande (prédiction fallback NDVI+CHM)
 #' @param lc_nn SpatRaster 1 bande (prédiction réseau de neurones)
+#' @param block_size Taille des blocs en pixels (défaut: 25 = 5m à 0.2m/px)
 #' @return SpatRaster 1 bande (prédiction hybride)
-hybrid_merge <- function(lc_fallback, lc_nn) {
-  # Identifier les zones connexes dans le fallback
-  # Chaque groupe de pixels adjacents de même classe = une zone
-  zones <- patches(lc_fallback, directions = 8, zeroAsNA = TRUE)
+hybrid_merge <- function(lc_fallback, lc_nn, block_size = 25) {
+  nr <- nrow(lc_fallback)
+  nc <- ncol(lc_fallback)
 
-  n_zones <- max(values(zones), na.rm = TRUE)
-  message(sprintf("    %d zones connexes détectées", n_zones))
+  fb_vec <- as.integer(values(lc_fallback)[, 1])
+  nn_vec <- as.integer(values(lc_nn)[, 1])
 
-  # Pour chaque zone, trouver la classe NN la plus fréquente
-  zone_vec <- as.integer(values(zones)[, 1])
-  nn_vec   <- as.integer(values(lc_nn)[, 1])
+  # Créer un identifiant de bloc spatial (grille régulière)
+  # Chaque bloc = block_size × block_size pixels (~5m × 5m)
+  row_idx <- rep(seq_len(nr), each = nc)   # 1,1,...,1, 2,2,...,2, ...
+  col_idx <- rep(seq_len(nc), times = nr)   # 1,2,...,nc, 1,2,...,nc, ...
+  row_block <- ceiling(row_idx / block_size)
+  col_block <- ceiling(col_idx / block_size)
+  n_row_blocks <- max(row_block)
 
-  # Calculer la classe NN majoritaire par zone (vectorisé)
-  # Utiliser tapply pour compter les votes par zone × classe
-  valid <- !is.na(zone_vec) & !is.na(nn_vec) & nn_vec > 0
-  zone_class_mode <- tapply(nn_vec[valid], zone_vec[valid], function(x) {
-    # Mode = classe la plus fréquente
+  # Zone = bloc spatial × classe fallback
+  # Chaque combinaison unique (bloc, classe) = une zone locale
+  block_id <- (col_block - 1L) * n_row_blocks + row_block  # ID du bloc
+  zone_id <- block_id * 100L + fb_vec  # zone = bloc × classe fallback
+
+  # Pour chaque zone, trouver la classe NN majoritaire
+  valid <- !is.na(fb_vec) & !is.na(nn_vec) & nn_vec > 0 & fb_vec > 0
+  zone_mode <- tapply(nn_vec[valid], zone_id[valid], function(x) {
     tab <- tabulate(x, nbins = 15)
+    if (max(tab) == 0) return(0L)
     which.max(tab)
   })
 
-  # Construire le vecteur de sortie
-  result_vec <- integer(length(zone_vec))
-  for (z in seq_along(zone_class_mode)) {
-    zone_id <- as.integer(names(zone_class_mode)[z])
-    result_vec[zone_vec == zone_id & !is.na(zone_vec)] <- zone_class_mode[z]
-  }
+  # Construire le résultat : chaque pixel reçoit la classe NN de sa zone
+  result_vec <- integer(length(fb_vec))
+  # Lookup vectorisé via match
+  zone_id_char <- as.character(zone_id)
+  mode_names <- names(zone_mode)
+  mode_values <- as.integer(zone_mode)
+  idx <- match(zone_id_char, mode_names)
+  has_match <- !is.na(idx)
+  result_vec[has_match] <- mode_values[idx[has_match]]
+
   # Pixels sans zone → prendre la prédiction NN directe
-  no_zone <- is.na(zone_vec) | result_vec == 0L
+  no_zone <- !has_match | result_vec == 0L
   result_vec[no_zone] <- nn_vec[no_zone]
 
   result <- rast(lc_fallback)
   values(result) <- result_vec
   names(result) <- "landcover"
 
-  # Stats
+  n_zones <- length(zone_mode)
   n_classes <- length(unique(result_vec[result_vec > 0]))
-  message(sprintf("    Fusion terminée : %d classes, %d zones", n_classes, n_zones))
+  message(sprintf("    Fusion : %d zones locales (blocs %dpx), %d classes",
+                   n_zones, block_size, n_classes))
 
   return(result)
 }
