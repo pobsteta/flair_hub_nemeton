@@ -217,29 +217,27 @@ result <- pipeline_aoi_to_landcover("data/aoi.gpkg",
 | `landcover_predicted.tif` | Carte d'occupation du sol prédite |
 | `resultats_aoi_flair_hub.pdf` | Visualisation récapitulative (4 panneaux) |
 
-## Classes d'occupation du sol (CoSIA)
+## Classes d'occupation du sol (CoSIA 15 classes)
 
-| ID | Classe | Couleur |
-|---|---|---|
-| 1 | Bâtiment | ![#db0e9a](https://via.placeholder.com/15/db0e9a/db0e9a.png) |
-| 2 | Serre | ![#938e7b](https://via.placeholder.com/15/938e7b/938e7b.png) |
-| 3 | Piscine | ![#f80c00](https://via.placeholder.com/15/f80c00/f80c00.png) |
-| 4 | Surface imperméable | ![#a97101](https://via.placeholder.com/15/a97101/a97101.png) |
-| 5 | Surface perméable | ![#1553ae](https://via.placeholder.com/15/1553ae/1553ae.png) |
-| 6 | Sol nu | ![#194a26](https://via.placeholder.com/15/194a26/194a26.png) |
-| 7 | Eau | ![#46e483](https://via.placeholder.com/15/46e483/46e483.png) |
-| 8 | Neige | ![#f3a60d](https://via.placeholder.com/15/f3a60d/f3a60d.png) |
-| 9 | Végétation herbacée | ![#660082](https://via.placeholder.com/15/660082/660082.png) |
-| 10 | Terre agricole | ![#55ff00](https://via.placeholder.com/15/55ff00/55ff00.png) |
-| 11 | Terre labourée | ![#fff30d](https://via.placeholder.com/15/fff30d/fff30d.png) |
-| 12 | Vigne | ![#e4df7c](https://via.placeholder.com/15/e4df7c/e4df7c.png) |
-| 13 | Verger | ![#3de6eb](https://via.placeholder.com/15/3de6eb/3de6eb.png) |
-| 14 | Feuillu | ![#ffffff](https://via.placeholder.com/15/ffffff/ffffff.png) |
-| 15 | Conifère | ![#8ab3a0](https://via.placeholder.com/15/8ab3a0/8ab3a0.png) |
-| 16 | Lande | ![#6b714f](https://via.placeholder.com/15/6b714f/6b714f.png) |
-| 17 | Ligneux mélangé | ![#c5dc42](https://via.placeholder.com/15/c5dc42/c5dc42.png) |
-| 18 | Fleur / Garrigue | ![#9999ff](https://via.placeholder.com/15/9999ff/9999ff.png) |
-| 19 | Non classé | ![#000000](https://via.placeholder.com/15/000000/000000.png) |
+Palette utilisée par le pipeline et intégrée dans le GeoTIFF exporté (color table + style QGIS) :
+
+| ID | Classe | Couleur | Hex |
+|---|---|---|---|
+| 1 | Bâtiment | ![#db0e9a](https://via.placeholder.com/15/db0e9a/db0e9a.png) | `#db0e9a` |
+| 2 | Serre | ![#9999ff](https://via.placeholder.com/15/9999ff/9999ff.png) | `#9999ff` |
+| 3 | Piscine | ![#3de6eb](https://via.placeholder.com/15/3de6eb/3de6eb.png) | `#3de6eb` |
+| 4 | Imperméable | ![#f80c00](https://via.placeholder.com/15/f80c00/f80c00.png) | `#f80c00` |
+| 5 | Perméable | ![#938e7b](https://via.placeholder.com/15/938e7b/938e7b.png) | `#938e7b` |
+| 6 | Sol nu | ![#a97101](https://via.placeholder.com/15/a97101/a97101.png) | `#a97101` |
+| 7 | Eau | ![#1553ae](https://via.placeholder.com/15/1553ae/1553ae.png) | `#1553ae` |
+| 8 | Neige | ![#ffffff](https://via.placeholder.com/15/ffffff/ffffff.png) | `#ffffff` |
+| 9 | Herbacé | ![#55ff00](https://via.placeholder.com/15/55ff00/55ff00.png) | `#55ff00` |
+| 10 | Agricole | ![#fff30d](https://via.placeholder.com/15/fff30d/fff30d.png) | `#fff30d` |
+| 11 | Labouré | ![#e4df7c](https://via.placeholder.com/15/e4df7c/e4df7c.png) | `#e4df7c` |
+| 12 | Vigne | ![#660082](https://via.placeholder.com/15/660082/660082.png) | `#660082` |
+| 13 | Feuillu | ![#46e483](https://via.placeholder.com/15/46e483/46e483.png) | `#46e483` |
+| 14 | Conifère | ![#194a26](https://via.placeholder.com/15/194a26/194a26.png) | `#194a26` |
+| 15 | Lande | ![#f3a60d](https://via.placeholder.com/15/f3a60d/f3a60d.png) | `#f3a60d` |
 
 ## Modèles pré-entraînés disponibles
 
