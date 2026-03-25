@@ -1279,22 +1279,26 @@ run_inference <- function(rgbi, model_path, buffer_px = 0, model_config = NULL) 
     return(result)
   }
 
-  # --- Blending par fenêtre de Hann (cosinus 2D) ---
-  # Principe : chaque pixel reçoit un poids = produit de deux cosinus
-  # (un par axe), maximal au centre du patch (~1.0) et quasi-nul aux
-  # bords (~0.0). Pour chaque pixel couvert par plusieurs patches,
-  # on conserve la prédiction du patch avec le poids le plus élevé.
-  # Résultat : les prédictions fiables (centre) l'emportent toujours
-  # sur les artefacts de bord → mosaïque sans couture.
+  # --- Vote pondéré par classe avec fenêtre de Hann ---
+  # Principe : pour chaque pixel couvert par plusieurs patches, on
+  # accumule le poids Hann pour chaque classe prédite. La classe avec
+  # le poids cumulé le plus élevé l'emporte (soft majority voting).
+  # Cela élimine les artefacts de bord car les prédictions du centre
+  # (poids élevé) dominent naturellement celles des bords (poids faible).
 
   out_ext  <- ext(rgbi)
   out_res  <- res(rgbi)[1]
   n_rows   <- nrow(rgbi)
   n_cols   <- ncol(rgbi)
 
-  # Matrices de travail (plus rapide que les accès cellule par cellule)
-  class_mat  <- matrix(0L, nrow = n_rows, ncol = n_cols)
-  weight_mat <- matrix(0,  nrow = n_rows, ncol = n_cols)
+  # Nombre de classes CoSIA (1..15)
+  n_classes <- if (!is.null(model_config)) {
+    max(model_config$n_classes, 15)
+  } else 15
+
+  # Matrice de votes : accumule le poids Hann par classe pour chaque pixel
+  # Dimension : n_classes × (n_rows * n_cols) — stockage en colonnes pour R
+  vote_mat <- matrix(0, nrow = n_classes, ncol = n_rows * n_cols)
 
   n_ok <- 0
   for (i in seq_along(patches)) {
@@ -1337,23 +1341,41 @@ run_inference <- function(rgbi, model_path, buffer_px = 0, model_config = NULL) 
     w_sub    <- w_mat[pr1:pr2, pc1:pc2]
     pred_sub <- pred_mat[pr1:pr2, pc1:pc2]
 
-    # Mettre à jour là où le nouveau poids dépasse le poids courant
-    current_w <- weight_mat[r1:r2, c1:c2]
-    better <- w_sub > current_w
+    # Accumuler les votes pondérés par classe (vectorisé)
+    # Calculer les indices linéaires (column-major) dans le raster de sortie
+    out_rows <- r1:r2
+    out_cols <- c1:c2
+    idx_mat <- outer(out_rows, (out_cols - 1L) * n_rows, "+")  # (rows, cols)
 
-    if (any(better)) {
-      class_mat[r1:r2, c1:c2][better]  <- pred_sub[better]
-      weight_mat[r1:r2, c1:c2][better] <- w_sub[better]
+    pred_flat <- as.integer(pred_sub)
+    w_flat <- as.numeric(w_sub)
+    idx_flat <- as.integer(idx_mat)
+
+    # Ajouter les votes par classe (15 itérations max, vectorisé par classe)
+    for (k in seq_len(n_classes)) {
+      mask <- pred_flat == k
+      if (any(mask)) {
+        idx_k <- idx_flat[mask]
+        # Accumuler les poids avec tapply pour gérer les doublons éventuels
+        vote_mat[k, idx_k] <- vote_mat[k, idx_k] + w_flat[mask]
+      }
     }
   }
 
   if (n_ok == 0) stop("Aucune prédiction réussie.")
 
-  message(sprintf("  Blending terminé (%d patches fusionnés)", n_ok))
+  # Classe finale = classe avec le vote pondéré le plus élevé
+  class_vec <- apply(vote_mat, 2, which.max)
+  # Pixels sans vote → 0
+  no_vote <- colSums(vote_mat) == 0
+  class_vec[no_vote] <- 0L
 
-  # Convertir la matrice en SpatRaster (row-major → vecteur via t())
+  message(sprintf("  Vote pondéré terminé (%d patches, %d classes détectées)",
+                   n_ok, length(unique(class_vec[class_vec > 0]))))
+
+  # Convertir en SpatRaster (column-major = ordre naturel de R)
   result <- rast(rgbi[[1]])
-  values(result) <- as.integer(as.vector(t(class_mat)))
+  values(result) <- as.integer(class_vec)
   names(result) <- "landcover"
   return(result)
 }
