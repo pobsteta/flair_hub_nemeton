@@ -1518,10 +1518,57 @@ pipeline_aoi_to_landcover <- function(aoi_path,
   step_exp <- if (use_dem) 6 else 5
   message(sprintf("\n>>> ÉTAPE %d/%d : Export des résultats", step_exp, n_steps))
 
-  # Carte d'occupation du sol
+  # Carte d'occupation du sol avec palette et labels intégrés
+  # (s'affiche automatiquement dans QGIS avec les bonnes couleurs)
   lc_path <- file.path(output_dir, "landcover_predicted.tif")
-  writeRaster(landcover, lc_path, overwrite = TRUE, gdal = c("COMPRESS=LZW"))
+
+  # Convertir les couleurs hex en RGB pour la color table (256 entrées RGBA)
+  ct <- data.frame(value = 0:255,
+                   red = 0L, green = 0L, blue = 0L, alpha = 0L)
+  # Classe 0 = non classifié (gris transparent)
+  ct[1, ] <- c(0L, 128L, 128L, 128L, 128L)
+  for (i in seq_along(COSIA_COLORS_15)) {
+    rgb <- col2rgb(COSIA_COLORS_15[i])
+    ct[i + 1, ] <- c(i, rgb[1], rgb[2], rgb[3], 255L)
+  }
+  coltab(landcover) <- ct
+
+  # Table attributaire raster (RAT) : labels des classes pour QGIS
+  lc_classes <- sort(unique(na.omit(as.integer(values(landcover)))))
+  lc_classes <- lc_classes[lc_classes >= 1 & lc_classes <= 15]
+  rat <- data.frame(
+    id    = lc_classes,
+    label = COSIA_LABELS_15[lc_classes]
+  )
+  levels(landcover) <- rat
+
+  writeRaster(landcover, lc_path, overwrite = TRUE,
+              gdal = c("COMPRESS=LZW"),
+              datatype = "INT1U")
   message("Occupation du sol: ", lc_path)
+
+  # Exporter un fichier de style QGIS (.qml) associé au TIF
+  qml_path <- sub("\\.tif$", ".qml", lc_path)
+  qml_items <- vapply(seq_along(COSIA_LABELS_15), function(i) {
+    rgb <- col2rgb(COSIA_COLORS_15[i])
+    sprintf('        <paletteEntry value="%d" color="%s" alpha="255" label="%s"/>',
+            i, COSIA_COLORS_15[i], COSIA_LABELS_15[i])
+  }, character(1))
+  qml_content <- paste0(
+    '<!DOCTYPE qgis PUBLIC "http://mrcc.com/qgis.dtd" "SYSTEM">\n',
+    '<qgis version="3" styleCategories="AllStyleCategories">\n',
+    '  <pipe>\n',
+    '    <rasterrenderer type="paletted" band="1">\n',
+    '      <colorPalette>\n',
+    '        <paletteEntry value="0" color="#808080" alpha="128" label="Non classifié"/>\n',
+    paste(qml_items, collapse = "\n"), "\n",
+    '      </colorPalette>\n',
+    '    </rasterrenderer>\n',
+    '  </pipe>\n',
+    '</qgis>\n'
+  )
+  writeLines(qml_content, qml_path)
+  message("Style QGIS:        ", qml_path)
 
   # NDVI (IRC bandes: 1=PIR, 2=Rouge, 3=Vert)
   pir   <- ortho$irc[[1]]
