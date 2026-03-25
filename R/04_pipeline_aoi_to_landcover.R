@@ -1238,6 +1238,56 @@ print(f"Prédit: {np.unique(pred).shape[0]} classes uniques")
 #' @param model_config Liste avec encoder, decoder, in_channels, n_out
 #'   (NULL = config par défaut ResNet34 + UNet)
 #' @return SpatRaster 1 bande (landcover)
+#' Fusion hybride : zones fallback + classes NN
+#'
+#' Pour chaque zone connexe du fallback, assigne la classe NN majoritaire.
+#' Résultat : contours précis (fallback pixel-level) + classes précises (NN).
+#'
+#' @param lc_fallback SpatRaster 1 bande (prédiction fallback NDVI+CHM)
+#' @param lc_nn SpatRaster 1 bande (prédiction réseau de neurones)
+#' @return SpatRaster 1 bande (prédiction hybride)
+hybrid_merge <- function(lc_fallback, lc_nn) {
+  # Identifier les zones connexes dans le fallback
+  # Chaque groupe de pixels adjacents de même classe = une zone
+  zones <- patches(lc_fallback, directions = 8, zeroAsNA = TRUE)
+
+  n_zones <- max(values(zones), na.rm = TRUE)
+  message(sprintf("    %d zones connexes détectées", n_zones))
+
+  # Pour chaque zone, trouver la classe NN la plus fréquente
+  zone_vec <- as.integer(values(zones)[, 1])
+  nn_vec   <- as.integer(values(lc_nn)[, 1])
+
+  # Calculer la classe NN majoritaire par zone (vectorisé)
+  # Utiliser tapply pour compter les votes par zone × classe
+  valid <- !is.na(zone_vec) & !is.na(nn_vec) & nn_vec > 0
+  zone_class_mode <- tapply(nn_vec[valid], zone_vec[valid], function(x) {
+    # Mode = classe la plus fréquente
+    tab <- tabulate(x, nbins = 15)
+    which.max(tab)
+  })
+
+  # Construire le vecteur de sortie
+  result_vec <- integer(length(zone_vec))
+  for (z in seq_along(zone_class_mode)) {
+    zone_id <- as.integer(names(zone_class_mode)[z])
+    result_vec[zone_vec == zone_id & !is.na(zone_vec)] <- zone_class_mode[z]
+  }
+  # Pixels sans zone → prendre la prédiction NN directe
+  no_zone <- is.na(zone_vec) | result_vec == 0L
+  result_vec[no_zone] <- nn_vec[no_zone]
+
+  result <- rast(lc_fallback)
+  values(result) <- result_vec
+  names(result) <- "landcover"
+
+  # Stats
+  n_classes <- length(unique(result_vec[result_vec > 0]))
+  message(sprintf("    Fusion terminée : %d classes, %d zones", n_classes, n_zones))
+
+  return(result)
+}
+
 run_inference <- function(rgbi, model_path, buffer_px = 0, model_config = NULL,
                           fallback = FALSE) {
   message("\n=== Inférence FLAIR-HUB ===")
@@ -1511,8 +1561,28 @@ pipeline_aoi_to_landcover <- function(aoi_path,
   message(sprintf("\n>>> ÉTAPE %d/%d : Inférence du modèle %s",
                    step_inf, n_steps, model_name))
 
-  landcover <- run_inference(inference_input, model_path, buffer_px = buffer_px,
-                             model_config = model_config, fallback = fallback)
+  if (fallback == "hybrid") {
+    # Mode hybride : zones du fallback + classes du NN
+    message("  Mode HYBRIDE : fallback (contours) + NN (classes)")
+
+    # 1. Prédiction fallback (contours nets, pixel par pixel)
+    message("  [1/3] Prédiction fallback NDVI+CHM (contours)...")
+    lc_fallback <- run_inference(inference_input, model_path, buffer_px = buffer_px,
+                                 model_config = model_config, fallback = TRUE)
+
+    # 2. Prédiction NN (bonnes classes, artefacts de patches)
+    message("  [2/3] Prédiction réseau de neurones (classes)...")
+    lc_nn <- run_inference(inference_input, model_path, buffer_px = buffer_px,
+                           model_config = model_config, fallback = FALSE)
+
+    # 3. Fusion : pour chaque zone fallback, assigner la classe NN majoritaire
+    message("  [3/3] Fusion : zones fallback × classes NN...")
+    landcover <- hybrid_merge(lc_fallback, lc_nn)
+  } else {
+    landcover <- run_inference(inference_input, model_path, buffer_px = buffer_px,
+                               model_config = model_config,
+                               fallback = isTRUE(fallback))
+  }
 
   # --- Étape 5/6 : Export ---
   step_exp <- if (use_dem) 6 else 5
