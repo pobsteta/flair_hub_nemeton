@@ -1454,38 +1454,22 @@ pipeline_aoi_to_landcover <- function(aoi_path,
 
   if (!is.null(model_config) && model_config$in_channels >= 5) {
     if (!is.null(dem_data)) {
-      # Le 5ème canal FLAIR-INC est le DSM (Digital Surface Model)
-      # Le DEM est déjà rééchantillonné à 0.2m et aligné sur la grille RGBI
-      elev <- dem_data$dem[["DSM"]]
+      # 5ème canal : utiliser le DTM (terrain nu, continu, sans artefact)
+      # plutôt que le DSM (surface, artefacts de dalles LiDAR HD).
+      # Le MNS LiDAR HD a des décalages entre dalles (10-30m) qui créent
+      # des frontières rectangulaires nettes interprétées comme des bâtiments.
+      # Le DTM (RGE ALTI) est un produit homogène sans ces artefacts.
+      elev <- dem_data$dem[["DTM"]]
       names(elev) <- "Elevation"
 
-      # Nettoyer les artefacts d'élévation (NA, 0, valeurs aberrantes)
-      # Les tuiles WMS peuvent avoir des zones sans données qui causent
-      # des artefacts rectangulaires dans la classification.
+      # Nettoyer les éventuels NA/0
       elev_vals <- values(elev)
       n_na <- sum(is.na(elev_vals))
-      n_zero <- sum(elev_vals == 0, na.rm = TRUE)
-      elev_range <- range(elev_vals, na.rm = TRUE)
-
-      if (n_na > 0 || n_zero > 100) {
-        message(sprintf("  Nettoyage élévation: %d NA, %d zéros, range [%.0f, %.0f]",
-                         n_na, n_zero, elev_range[1], elev_range[2]))
-        # Remplacer les zéros isolés par NA (artefacts de tuiles WMS)
-        # (les vrais zéros d'altitude sont rares en métropole : mer/littoral)
-        elev_median <- median(elev_vals, na.rm = TRUE)
-        if (elev_median > 10) {  # Zone non littorale
-          elev[elev == 0] <- NA
-        }
-        # Combler les NA par interpolation focale (voisinage 5×5)
+      if (n_na > 0) {
+        message(sprintf("  Nettoyage élévation: %d NA", n_na))
+        elev <- focal(elev, w = 5, fun = "mean", na.policy = "only", na.rm = TRUE)
         if (any(is.na(values(elev)))) {
-          elev <- focal(elev, w = 5, fun = "mean", na.policy = "only", na.rm = TRUE)
-          # Si encore des NA (grands trous), utiliser la médiane
-          remaining_na <- sum(is.na(values(elev)))
-          if (remaining_na > 0) {
-            message(sprintf("  %d NA restants comblés par la médiane (%.0f m)",
-                             remaining_na, elev_median))
-            elev[is.na(elev)] <- elev_median
-          }
+          elev[is.na(elev)] <- median(elev_vals, na.rm = TRUE)
         }
       }
 
