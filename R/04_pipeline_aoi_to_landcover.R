@@ -601,6 +601,30 @@ download_dem_for_aoi <- function(aoi, output_dir, res_m = 1, rgbi = NULL) {
     dsm <- resample(dsm, dtm, method = "bilinear")
   }
 
+  # --- Lissage du DSM pour atténuer les artefacts de tuiles LiDAR HD ---
+  # Le MNS LiDAR HD est constitué de dalles acquises à différentes dates.
+  # Les jointures entre dalles créent des sauts brusques d'altitude (10-30m)
+  # que le modèle de classification interprète comme des bâtiments.
+  # Un filtre médian 3×3 supprime ces discontinuités rectangulaires tout en
+  # préservant les vraies structures (bâtiments, arbres).
+  if (has_mns) {
+    message("Lissage du DSM (filtre médian 3x3) pour supprimer les artefacts de tuiles...")
+    dsm_smooth <- focal(dsm, w = 3, fun = "median", na.rm = TRUE)
+    # Détecter les pixels avec des sauts > 10m par rapport aux voisins
+    # et ne lisser que ceux-là (préservation des vrais bâtiments)
+    diff_abs <- abs(dsm - dsm_smooth)
+    big_jumps <- diff_abs > 10  # seuil : 10m de saut = artefact de dalle
+    n_fixed <- sum(values(big_jumps), na.rm = TRUE)
+    if (n_fixed > 0) {
+      message(sprintf("  %d pixels avec saut > 10m corrigés (%.1f%% de l'image)",
+                       n_fixed, 100 * n_fixed / ncell(dsm)))
+      # Remplacer uniquement les pixels aberrants par la valeur lissée
+      dsm[big_jumps] <- dsm_smooth[big_jumps]
+    } else {
+      message("  Aucun artefact de tuile détecté (sauts > 10m)")
+    }
+  }
+
   # Combiner en SpatRaster 2 bandes (format FLAIR-HUB DEM_ELEV)
   dem <- c(dsm[[1]], dtm[[1]])
   names(dem) <- c("DSM", "DTM")
