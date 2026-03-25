@@ -889,7 +889,10 @@ predict_patch <- function(patch, model_path, model_config = NULL, ...) {
 
   tmp_in_py <- gsub("\\\\", "/", tmp_in)
   tmp_out_py <- gsub("\\\\", "/", tmp_out)
-  model_path_py <- gsub("\\\\", "/", model_path)
+  # Résoudre les symlinks avant de passer le chemin à Python
+  # (le cache HuggingFace utilise des symlinks qui peuvent être cassés sur Windows)
+  model_path_resolved <- normalizePath(model_path, mustWork = FALSE)
+  model_path_py <- gsub("\\\\", "/", model_path_resolved)
 
   # NOTE: utiliser gsub au lieu de sprintf pour éviter la limite de 8192
   # octets de sprintf sur les longues chaînes de format
@@ -915,22 +918,57 @@ print(f"Patch: {num_bands} bandes, {H}x{W} px")
 # ======================================================================
 model_dir = "__MODEL_PATH__"
 ckpt_path = None
-if os.path.isdir(model_dir):
-    # Scan avec priorité : .ckpt > .pth > .pt > .bin > .safetensors
-    ckpt_exts = [".ckpt", ".pth", ".pt", ".bin", ".safetensors"]
-    candidates = []
-    for f in os.listdir(model_dir):
-        for i, ext in enumerate(ckpt_exts):
-            if f.endswith(ext):
-                candidates.append((i, f))
-                break
-    if candidates:
-        candidates.sort()
-        ckpt_path = os.path.join(model_dir, candidates[0][1])
-        if len(candidates) > 1:
-            print(f"  Fichiers trouvés: {[c[1] for c in candidates]}, choisi: {candidates[0][1]}")
-elif os.path.isfile(model_dir):
-    ckpt_path = model_dir
+
+# Résoudre les symlinks (nécessaire sur Windows où le cache HuggingFace
+# utilise des symlinks dans snapshots/ pointant vers blobs/)
+resolved = os.path.realpath(model_dir)
+if resolved != model_dir:
+    print(f"  Résolution symlink: {os.path.basename(model_dir)} -> {os.path.basename(resolved)}")
+
+# Essayer le chemin résolu d abord, puis le chemin original
+for try_path in [resolved, model_dir]:
+    if ckpt_path is not None:
+        break
+    if os.path.isdir(try_path):
+        # Scan avec priorité : .ckpt > .pth > .pt > .bin > .safetensors
+        ckpt_exts = [".ckpt", ".pth", ".pt", ".bin", ".safetensors"]
+        candidates = []
+        for f in os.listdir(try_path):
+            for i, ext in enumerate(ckpt_exts):
+                if f.endswith(ext):
+                    candidates.append((i, f))
+                    break
+        if candidates:
+            candidates.sort()
+            ckpt_path = os.path.join(try_path, candidates[0][1])
+            if len(candidates) > 1:
+                print(f"  Fichiers trouvés: {[c[1] for c in candidates]}, choisi: {candidates[0][1]}")
+    elif os.path.isfile(try_path):
+        ckpt_path = try_path
+
+# Fallback: si le chemin pointe vers snapshots/ mais le fichier n existe pas
+# (symlink cassé sur Windows), chercher le blob correspondant dans le cache
+if ckpt_path is None and "snapshots" in model_dir:
+    cache_root = model_dir.split("snapshots")[0]
+    blobs_dir = os.path.join(cache_root, "blobs")
+    if os.path.isdir(blobs_dir):
+        print(f"  Symlink cassé, recherche dans blobs/...")
+        blob_files = [f for f in os.listdir(blobs_dir)
+                      if not f.endswith(".lock") and not f.endswith(".incomplete")]
+        # Prendre le plus gros fichier (les poids du modèle sont le plus gros blob)
+        if blob_files:
+            blob_sizes = [(os.path.getsize(os.path.join(blobs_dir, f)), f)
+                          for f in blob_files]
+            blob_sizes.sort(reverse=True)
+            biggest = blob_sizes[0]
+            # Les poids d un ResNet34-UNet font > 1 Mo
+            if biggest[0] > 1_000_000:
+                ckpt_path = os.path.join(blobs_dir, biggest[1])
+                print(f"  Blob trouvé: {biggest[1]} ({biggest[0] / 1e6:.1f} Mo)")
+            else:
+                print(f"  Aucun blob assez gros pour être un modèle (max: {biggest[0]} octets)")
+    else:
+        print(f"  Répertoire blobs/ non trouvé dans: {cache_root}")
 
 model_loaded = False
 
